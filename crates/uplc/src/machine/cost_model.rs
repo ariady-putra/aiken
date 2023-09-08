@@ -39,7 +39,7 @@ impl ExBudget {
 
     pub fn max() -> Self {
         ExBudget {
-            mem: 14000000000,
+            mem: 14000000000000,
             cpu: 10000000000000,
         }
     }
@@ -91,6 +91,8 @@ pub struct MachineCosts {
     delay: ExBudget,
     force: ExBudget,
     apply: ExBudget,
+    constr: ExBudget,
+    case: ExBudget,
     /// Just the cost of evaluating a Builtin node, not the builtin itself.
     builtin: ExBudget,
 }
@@ -106,6 +108,8 @@ impl MachineCosts {
             StepKind::Delay => self.delay,
             StepKind::Force => self.force,
             StepKind::Builtin => self.builtin,
+            StepKind::Constr => self.constr,
+            StepKind::Case => self.case,
             StepKind::StartUp => self.startup,
         }
     }
@@ -140,6 +144,15 @@ impl MachineCosts {
             builtin: ExBudget {
                 mem: 100,
                 cpu: 23000,
+            },
+            // Placeholder values
+            constr: ExBudget {
+                mem: 30000000000,
+                cpu: 30000000000,
+            },
+            case: ExBudget {
+                mem: 30000000000,
+                cpu: 30000000000,
             },
         }
     }
@@ -177,6 +190,15 @@ impl Default for MachineCosts {
             builtin: ExBudget {
                 mem: 100,
                 cpu: 23000,
+            },
+            // Placeholder values
+            constr: ExBudget {
+                mem: 30000000000,
+                cpu: 30000000000,
+            },
+            case: ExBudget {
+                mem: 30000000000,
+                cpu: 30000000000,
             },
         }
     }
@@ -2230,6 +2252,22 @@ pub fn initialize_cost_model(version: &Language, costs: &[i64]) -> CostModel {
                     .get("cek_builtin_cost-exBudgetCPU")
                     .unwrap_or(&30000000000),
             },
+            constr: ExBudget {
+                mem: *cost_map
+                    .get("cek_constr_cost-exBudgetmem")
+                    .unwrap_or(&30000000000),
+                cpu: *cost_map
+                    .get("cek_constr_cost-exBudgetCPU")
+                    .unwrap_or(&30000000000),
+            },
+            case: ExBudget {
+                mem: *cost_map
+                    .get("cek_case_cost-exBudgetmem")
+                    .unwrap_or(&30000000000),
+                cpu: *cost_map
+                    .get("cek_case_cost-exBudgetCPU")
+                    .unwrap_or(&30000000000),
+            },
         },
         builtin_costs: BuiltinCosts {
             add_integer: CostingFun {
@@ -3198,8 +3236,10 @@ pub enum StepKind {
     Delay = 4,
     Force = 5,
     Builtin = 6,
+    Constr = 7,
+    Case = 8,
     // DO NOT USE THIS IN `step_and_maybe_spend`
-    StartUp = 7,
+    StartUp = 9,
 }
 
 impl TryFrom<u8> for StepKind {
@@ -3214,6 +3254,8 @@ impl TryFrom<u8> for StepKind {
             4 => Ok(StepKind::Delay),
             5 => Ok(StepKind::Force),
             6 => Ok(StepKind::Builtin),
+            7 => Ok(StepKind::Constr),
+            8 => Ok(StepKind::Case),
             v => Err(super::error::Error::InvalidStepKind(v)),
         }
     }

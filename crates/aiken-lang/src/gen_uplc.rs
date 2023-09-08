@@ -951,7 +951,7 @@ impl<'a> CodeGenerator<'a> {
                         type_map.insert(index, field_type);
                     }
 
-                    assert!(type_map.len() == arguments.len());
+                    assert!(type_map.len() >= arguments.len());
 
                     let fields = arguments
                         .iter()
@@ -1903,7 +1903,7 @@ impl<'a> CodeGenerator<'a> {
     }
 
     pub fn clause_pattern(
-        &mut self,
+        &self,
         pattern: &Pattern<PatternConstructor, Arc<Type>>,
         subject_tipo: &Arc<Type>,
         props: &mut ClauseProperties,
@@ -2329,7 +2329,7 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn nested_clause_condition(
-        &mut self,
+        &self,
         pattern: &Pattern<PatternConstructor, Arc<Type>>,
         subject_tipo: &Arc<Type>,
         props: &mut ClauseProperties,
@@ -2992,8 +2992,7 @@ impl<'a> CodeGenerator<'a> {
 
                     let function_def = self.functions.get(&generic_function_key);
 
-                    let Some(function_def) = function_def
-                    else {
+                    let Some(function_def) = function_def else {
                         let code_gen_func = self
                             .code_gen_functions
                             .get(&generic_function_key.function_name)

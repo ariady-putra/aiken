@@ -145,6 +145,32 @@ where
                 )
                 .append(RcDoc::line_())
                 .append(RcDoc::text(")")),
+            Term::Constr { tag, fields } => RcDoc::text("(")
+                .append(
+                    RcDoc::text("constr")
+                        .append(RcDoc::line())
+                        .append(RcDoc::as_string(tag))
+                        .nest(2),
+                )
+                .append(RcDoc::line_())
+                .append(RcDoc::intersperse(
+                    fields.iter().map(|f| f.to_doc()),
+                    RcDoc::line_(),
+                ))
+                .append(RcDoc::text(")")),
+            Term::Case { constr, branches } => RcDoc::text("(")
+                .append(
+                    RcDoc::text("case")
+                        .append(RcDoc::line())
+                        .append(constr.to_doc())
+                        .nest(2),
+                )
+                .append(RcDoc::line_())
+                .append(RcDoc::intersperse(
+                    branches.iter().map(|f| f.to_doc()),
+                    RcDoc::line_(),
+                ))
+                .append(RcDoc::text(")")),
         }
         .group()
     }
@@ -226,7 +252,10 @@ impl Constant {
                 .append(RcDoc::text(", "))
                 .append(right.to_doc_list())
                 .append(RcDoc::text(")")),
-            d @ Constant::Data(_) => RcDoc::text("data ").append(d.to_doc_list()),
+            Constant::Data(d) => RcDoc::text("data ")
+                .append(RcDoc::text("("))
+                .append(Self::to_doc_list_plutus_data(d))
+                .append(RcDoc::text(")")),
         }
     }
 
@@ -251,9 +280,7 @@ impl Constant {
                 .append((*right).to_doc_list())
                 .append(RcDoc::text(")")),
 
-            Constant::Data(data) => RcDoc::text("(")
-                .append(Self::to_doc_list_plutus_data(data))
-                .append(RcDoc::text(")")),
+            Constant::Data(data) => Self::to_doc_list_plutus_data(data),
         }
     }
 
