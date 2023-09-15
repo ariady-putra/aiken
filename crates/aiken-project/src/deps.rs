@@ -10,7 +10,7 @@ use crate::{
     error::Error,
     package_name::PackageName,
     paths,
-    telemetry::{Event, EventListener},
+    telemetry::{DownloadSource, Event, EventListener},
 };
 
 use self::{
@@ -26,7 +26,7 @@ pub enum UseManifest {
     No,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct LocalPackages {
     packages: Vec<Dependency>,
 }
@@ -100,17 +100,16 @@ impl LocalPackages {
 
     pub fn missing_local_packages<'a>(
         &self,
-        manifest: &'a Manifest,
+        packages: &'a [Package],
         root: &PackageName,
     ) -> Vec<&'a Package> {
-        manifest
-            .packages
+        packages
             .iter()
             .filter(|p| {
                 &p.name != root
                     && !matches!(
                         self.packages.iter().find(|p2| p2.name == p.name),
-                        Some(Dependency { version, .. }) if &p.version == version,
+                        Some(Dependency { version, .. }) if paths::is_git_sha_or_tag(version) && &p.version == version,
                     )
             })
             .collect()
@@ -133,12 +132,7 @@ impl From<&Manifest> for LocalPackages {
     }
 }
 
-pub fn download<T>(
-    event_listener: &T,
-    use_manifest: UseManifest,
-    root_path: &Path,
-    config: &Config,
-) -> Result<Manifest, Error>
+pub fn download<T>(event_listener: &T, root_path: &Path, config: &Config) -> Result<Manifest, Error>
 where
     T: EventListener,
 {
@@ -164,20 +158,14 @@ where
 
     let runtime = tokio::runtime::Runtime::new().expect("Unable to start Tokio");
 
-    let (manifest, changed) = Manifest::load(
-        runtime.handle().clone(),
-        event_listener,
-        config,
-        use_manifest,
-        root_path,
-    )?;
+    let (mut manifest, changed) = Manifest::load(event_listener, config, root_path)?;
 
     let local = LocalPackages::load(root_path)?;
 
     local.remove_extra_packages(&manifest, root_path)?;
 
     runtime.block_on(fetch_missing_packages(
-        &manifest,
+        &mut manifest,
         &local,
         project_name,
         root_path,
@@ -194,7 +182,7 @@ where
 }
 
 async fn fetch_missing_packages<T>(
-    manifest: &Manifest,
+    manifest: &mut Manifest,
     local: &LocalPackages,
     project_name: PackageName,
     root_path: &Path,
@@ -203,30 +191,50 @@ async fn fetch_missing_packages<T>(
 where
     T: EventListener,
 {
-    let mut count = 0;
+    let packages = manifest.packages.to_owned();
 
     let mut missing = local
-        .missing_local_packages(manifest, &project_name)
+        .missing_local_packages(&packages, &project_name)
         .into_iter()
-        .map(|package| {
-            count += 1;
-            package
-        })
         .peekable();
 
     if missing.peek().is_some() {
         let start = Instant::now();
 
-        event_listener.handle_event(Event::DownloadingPackage {
-            name: "packages".to_string(),
+        event_listener.handle_event(Event::ResolvingPackages {
+            name: format!("{project_name}"),
         });
 
         let downloader = Downloader::new(root_path);
 
-        downloader.download_packages(missing, &project_name).await?;
+        let statuses = downloader
+            .download_packages(event_listener, missing, &project_name, manifest)
+            .await?;
 
-        event_listener.handle_event(Event::PackagesDownloaded { start, count });
+        let downloaded_from_network = statuses
+            .iter()
+            .filter(|(_, downloaded)| *downloaded)
+            .count();
+        if downloaded_from_network > 0 {
+            event_listener.handle_event(Event::PackagesDownloaded {
+                start,
+                count: downloaded_from_network,
+                source: DownloadSource::Network,
+            });
+        }
+
+        let downloaded_from_cache = statuses
+            .iter()
+            .filter(|(_, downloaded)| !downloaded)
+            .count();
+        if downloaded_from_cache > 0 {
+            event_listener.handle_event(Event::PackagesDownloaded {
+                start,
+                count: downloaded_from_cache,
+                source: DownloadSource::Cache,
+            });
+        }
     }
 
-    Ok(())
+    manifest.save(root_path)
 }

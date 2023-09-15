@@ -2,7 +2,7 @@ pub mod air;
 pub mod builder;
 pub mod tree;
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
@@ -18,7 +18,7 @@ use uplc::{
 use crate::{
     ast::{
         AssignmentKind, BinOp, Pattern, Span, TypedArg, TypedClause, TypedDataType, TypedFunction,
-        TypedValidator, UnOp,
+        TypedPattern, TypedValidator, UnOp,
     },
     builtins::{bool, data, int, void},
     expr::TypedExpr,
@@ -476,7 +476,7 @@ impl<'a> CodeGenerator<'a> {
                     assignment.hoist_over(clause_then)
                 } else {
                     clauses = if subject.tipo().is_list() {
-                        rearrange_list_clauses(clauses)
+                        rearrange_list_clauses(clauses, &self.data_types)
                     } else {
                         clauses
                     };
@@ -658,9 +658,9 @@ impl<'a> CodeGenerator<'a> {
 
     pub fn assignment(
         &mut self,
-        pattern: &Pattern<PatternConstructor, Arc<Type>>,
+        pattern: &TypedPattern,
         mut value: AirTree,
-        tipo: &Arc<Type>,
+        tipo: &Rc<Type>,
         props: AssignmentProperties,
     ) -> AirTree {
         assert!(
@@ -938,7 +938,7 @@ impl<'a> CodeGenerator<'a> {
 
                     let field_map = field_map.clone();
 
-                    let mut type_map: IndexMap<usize, Arc<Type>> = IndexMap::new();
+                    let mut type_map: IndexMap<usize, Rc<Type>> = IndexMap::new();
 
                     for (index, arg) in constr_tipo
                         .arg_types()
@@ -1038,7 +1038,7 @@ impl<'a> CodeGenerator<'a> {
             Pattern::Tuple {
                 elems, location, ..
             } => {
-                let mut type_map: IndexMap<usize, Arc<Type>> = IndexMap::new();
+                let mut type_map: IndexMap<usize, Rc<Type>> = IndexMap::new();
 
                 let mut sequence = vec![];
 
@@ -1120,7 +1120,7 @@ impl<'a> CodeGenerator<'a> {
 
     pub fn expect_type_assign(
         &mut self,
-        tipo: &Arc<Type>,
+        tipo: &Rc<Type>,
         value: AirTree,
         defined_data_types: &mut IndexMap<String, u64>,
         location: Span,
@@ -1388,7 +1388,7 @@ impl<'a> CodeGenerator<'a> {
 
             assert!(data_type.typed_parameters.len() == tipo.arg_types().unwrap().len());
 
-            let mono_types: IndexMap<u64, Arc<Type>> = if !data_type.typed_parameters.is_empty() {
+            let mono_types: IndexMap<u64, Rc<Type>> = if !data_type.typed_parameters.is_empty() {
                 data_type
                     .typed_parameters
                     .iter()
@@ -1558,7 +1558,7 @@ impl<'a> CodeGenerator<'a> {
         &mut self,
         clauses: &[TypedClause],
         final_clause: TypedClause,
-        subject_tipo: &Arc<Type>,
+        subject_tipo: &Rc<Type>,
         props: &mut ClauseProperties,
     ) -> AirTree {
         assert!(
@@ -1767,8 +1767,8 @@ impl<'a> CodeGenerator<'a> {
 
                     let mut is_wild_card_elems_clause = clause.guard.is_none();
                     for element in elements.iter() {
-                        is_wild_card_elems_clause =
-                            is_wild_card_elems_clause && !pattern_has_conditions(element);
+                        is_wild_card_elems_clause = is_wild_card_elems_clause
+                            && !pattern_has_conditions(element, &self.data_types);
                     }
 
                     if *checked_index < elements_len.try_into().unwrap()
@@ -1904,8 +1904,8 @@ impl<'a> CodeGenerator<'a> {
 
     pub fn clause_pattern(
         &self,
-        pattern: &Pattern<PatternConstructor, Arc<Type>>,
-        subject_tipo: &Arc<Type>,
+        pattern: &Pattern<PatternConstructor, Rc<Type>>,
+        subject_tipo: &Rc<Type>,
         props: &mut ClauseProperties,
         // We return condition and then assignments sequence
     ) -> (AirTree, AirTree) {
@@ -2052,7 +2052,7 @@ impl<'a> CodeGenerator<'a> {
                     AirTree::list_expose(
                         defined_heads
                             .into_iter()
-                            .zip(defined_tails.into_iter())
+                            .zip(defined_tails)
                             .filter(|(head, _)| head != "_")
                             .map(|(head, tail)| (tail, head))
                             .collect_vec(),
@@ -2102,7 +2102,7 @@ impl<'a> CodeGenerator<'a> {
                         PatternConstructor::Record { field_map, .. } => field_map.clone(),
                     };
 
-                    let mut type_map: IndexMap<usize, Arc<Type>> = IndexMap::new();
+                    let mut type_map: IndexMap<usize, Rc<Type>> = IndexMap::new();
 
                     for (index, arg) in function_tipo.arg_types().unwrap().iter().enumerate() {
                         let field_type = arg.clone();
@@ -2330,8 +2330,8 @@ impl<'a> CodeGenerator<'a> {
 
     fn nested_clause_condition(
         &self,
-        pattern: &Pattern<PatternConstructor, Arc<Type>>,
-        subject_tipo: &Arc<Type>,
+        pattern: &Pattern<PatternConstructor, Rc<Type>>,
+        subject_tipo: &Rc<Type>,
         props: &mut ClauseProperties,
     ) -> AirTree {
         if props.final_clause {
@@ -2447,9 +2447,7 @@ impl<'a> CodeGenerator<'a> {
                     }
                 }
                 Pattern::Constructor {
-                    name: constr_name,
-                    is_record,
-                    ..
+                    name: constr_name, ..
                 } => {
                     if subject_tipo.is_bool() {
                         props.complex_clause = true;
@@ -2461,7 +2459,10 @@ impl<'a> CodeGenerator<'a> {
                     } else {
                         let (cond, assign) = self.clause_pattern(pattern, subject_tipo, props);
 
-                        if *is_record {
+                        let data_type = lookup_data_type_by_tipo(&self.data_types, subject_tipo)
+                            .expect("Missing data type");
+
+                        if data_type.constructors.len() == 1 {
                             assign
                         } else {
                             props.complex_clause = true;
@@ -3063,10 +3064,10 @@ impl<'a> CodeGenerator<'a> {
                         &self.data_types,
                     ));
 
-                    let mono_types: IndexMap<u64, Arc<Type>> = if !function_def_types.is_empty() {
+                    let mono_types: IndexMap<u64, Rc<Type>> = if !function_def_types.is_empty() {
                         function_def_types
                             .into_iter()
-                            .zip(function_var_types.into_iter())
+                            .zip(function_var_types)
                             .flat_map(|(func_tipo, var_tipo)| {
                                 get_generic_id_and_type(&func_tipo, &var_tipo)
                             })
@@ -3372,7 +3373,7 @@ impl<'a> CodeGenerator<'a> {
                                 UplcType::Pair(UplcType::Data.into(), UplcType::Data.into()),
                                 convert_keys
                                     .into_iter()
-                                    .zip(convert_values.into_iter())
+                                    .zip(convert_values)
                                     .map(|(key, value)| {
                                         UplcConstant::ProtoPair(
                                             UplcType::Data,

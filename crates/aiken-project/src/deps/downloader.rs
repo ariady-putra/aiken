@@ -8,9 +8,11 @@ use reqwest::Client;
 use zip::result::ZipError;
 
 use crate::{
+    deps::manifest::Manifest,
     error::Error,
     package_name::PackageName,
     paths::{self, CacheKey},
+    telemetry::EventListener,
 };
 
 use super::manifest::Package;
@@ -28,31 +30,41 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    pub async fn download_packages<T>(
+    pub async fn download_packages<I, T>(
         &self,
-        packages: T,
+        event_listener: &T,
+        packages: I,
         project_name: &PackageName,
-    ) -> Result<(), Error>
+        manifest: &mut Manifest,
+    ) -> Result<Vec<(PackageName, bool)>, Error>
     where
-        T: Iterator<Item = &'a Package>,
+        T: EventListener,
+        I: Iterator<Item = &'a Package>,
     {
-        let tasks = packages
-            .filter(|package| project_name != &package.name)
-            .map(|package| self.ensure_package_in_build_directory(package));
+        let mut tasks = vec![];
 
-        let _results = future::try_join_all(tasks).await?;
+        for package in packages.filter(|package| project_name != &package.name) {
+            let cache_key =
+                paths::CacheKey::new(&self.http, event_listener, package, manifest).await?;
+            let task = self.ensure_package_in_build_directory(package, cache_key);
+            tasks.push(task);
+        }
 
-        Ok(())
+        future::try_join_all(tasks).await
     }
 
     pub async fn ensure_package_in_build_directory(
         &self,
         package: &Package,
-    ) -> Result<bool, Error> {
-        let cache_key = paths::CacheKey::new(&self.http, package).await?;
-        self.ensure_package_downloaded(package, &cache_key).await?;
-        self.extract_package_from_cache(&package.name, &cache_key)
+        cache_key: CacheKey,
+    ) -> Result<(PackageName, bool), Error> {
+        let downloaded = self
+            .ensure_package_downloaded(package, &cache_key)
             .await
+            .map(|downloaded| (package.name.clone(), downloaded))?;
+        self.extract_package_from_cache(&package.name, &cache_key)
+            .await?;
+        Ok(downloaded)
     }
 
     pub async fn ensure_package_downloaded(
@@ -92,8 +104,6 @@ impl<'a> Downloader<'a> {
 
         let bytes = response.bytes().await?;
 
-        // let PackageSource::Github { url } = &package.source;
-
         tokio::fs::write(&zipball_path, bytes).await?;
 
         Ok(true)
@@ -103,13 +113,8 @@ impl<'a> Downloader<'a> {
         &self,
         name: &PackageName,
         cache_key: &CacheKey,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         let destination = self.root_path.join(paths::build_deps_package(name));
-
-        // If the directory already exists then there's nothing for us to do
-        if destination.is_dir() {
-            return Ok(false);
-        }
 
         tokio::fs::create_dir_all(&destination).await?;
 
@@ -135,7 +140,7 @@ impl<'a> Downloader<'a> {
 
         result?;
 
-        Ok(true)
+        Ok(())
     }
 }
 
