@@ -21,6 +21,10 @@ impl TreePath {
         TreePath { path: vec![] }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+
     pub fn push(&mut self, depth: usize, index: usize) {
         self.path.push((depth, index));
     }
@@ -53,27 +57,6 @@ impl TreePath {
         }
 
         common_ancestor
-    }
-
-    pub fn diff_ancestor(&self, ancestor: &Self) -> Self {
-        let mut self_iter = self.path.iter();
-        let ancestor_iter = ancestor.path.iter();
-
-        for ancestor in ancestor_iter {
-            if let Some(self_path) = self_iter.next() {
-                if self_path == ancestor {
-                    continue;
-                } else {
-                    unreachable!("Other path is not a common ancestor self path.")
-                }
-            } else {
-                unreachable!("Other path is longer than self path.")
-            }
-        }
-
-        TreePath {
-            path: self_iter.cloned().collect_vec(),
-        }
     }
 }
 
@@ -132,6 +115,13 @@ pub enum AirStatement {
         recursive_nonstatic_params: Vec<String>,
         variant_name: String,
         func_body: Box<AirTree>,
+    },
+    DefineCyclicFuncs {
+        func_name: String,
+        module_name: String,
+        variant_name: String,
+        // params and body
+        contained_functions: Vec<(Vec<String>, AirTree)>,
     },
     // Assertions
     AssertConstr {
@@ -325,21 +315,10 @@ pub enum AirExpression {
         record: Box<AirTree>,
         args: Vec<AirTree>,
     },
-    // Field Access
-    RecordAccess {
-        field_index: u64,
-        tipo: Rc<Type>,
-        record: Box<AirTree>,
-    },
-    // Tuple Access
-    TupleIndex {
-        tipo: Rc<Type>,
-        tuple_index: usize,
-        tuple: Box<AirTree>,
-    },
     // Misc.
     ErrorTerm {
         tipo: Rc<Type>,
+        validator: bool,
     },
     Trace {
         tipo: Rc<Type>,
@@ -436,6 +415,22 @@ impl AirTree {
                 recursive_nonstatic_params,
                 variant_name: variant_name.to_string(),
                 func_body: func_body.into(),
+            },
+            hoisted_over: None,
+        }
+    }
+    pub fn define_cyclic_func(
+        func_name: impl ToString,
+        module_name: impl ToString,
+        variant_name: impl ToString,
+        contained_functions: Vec<(Vec<String>, AirTree)>,
+    ) -> AirTree {
+        AirTree::Statement {
+            statement: AirStatement::DefineCyclicFuncs {
+                func_name: func_name.to_string(),
+                module_name: module_name.to_string(),
+                variant_name: variant_name.to_string(),
+                contained_functions,
             },
             hoisted_over: None,
         }
@@ -678,12 +673,33 @@ impl AirTree {
             args,
         })
     }
-    pub fn record_access(field_index: u64, tipo: Rc<Type>, record: AirTree) -> AirTree {
-        AirTree::Expression(AirExpression::RecordAccess {
-            field_index,
-            tipo,
-            record: record.into(),
-        })
+    pub fn index_access(function_name: String, tipo: Rc<Type>, list_of_fields: AirTree) -> AirTree {
+        AirTree::cast_from_data(
+            AirTree::call(
+                AirTree::var(
+                    ValueConstructor::public(
+                        Type::Fn {
+                            args: vec![list(data())],
+                            ret: data(),
+                        }
+                        .into(),
+                        ValueConstructorVariant::ModuleFn {
+                            name: function_name.clone(),
+                            field_map: None,
+                            module: "".to_string(),
+                            arity: 1,
+                            location: Span::empty(),
+                            builtin: None,
+                        },
+                    ),
+                    function_name,
+                    "",
+                ),
+                data(),
+                vec![list_of_fields],
+            ),
+            tipo.clone(),
+        )
     }
 
     pub fn fields_expose(
@@ -748,15 +764,22 @@ impl AirTree {
             hoisted_over: None,
         }
     }
-    pub fn tuple_index(tuple_index: usize, tipo: Rc<Type>, tuple: AirTree) -> AirTree {
-        AirTree::Expression(AirExpression::TupleIndex {
-            tipo,
-            tuple_index,
-            tuple: tuple.into(),
-        })
+    pub fn pair_index(index: usize, tipo: Rc<Type>, tuple: AirTree) -> AirTree {
+        AirTree::cast_from_data(
+            AirTree::builtin(
+                if index == 0 {
+                    DefaultFunction::FstPair
+                } else {
+                    DefaultFunction::SndPair
+                },
+                data(),
+                vec![tuple],
+            ),
+            tipo.clone(),
+        )
     }
-    pub fn error(tipo: Rc<Type>) -> AirTree {
-        AirTree::Expression(AirExpression::ErrorTerm { tipo })
+    pub fn error(tipo: Rc<Type>, validator: bool) -> AirTree {
+        AirTree::Expression(AirExpression::ErrorTerm { tipo, validator })
     }
     pub fn trace(msg: AirTree, tipo: Rc<Type>, then: AirTree) -> AirTree {
         AirTree::Expression(AirExpression::Trace {
@@ -891,6 +914,26 @@ impl AirTree {
                             variant_name: variant_name.clone(),
                         });
                         func_body.create_air_vec(air_vec);
+                    }
+                    AirStatement::DefineCyclicFuncs {
+                        func_name,
+                        module_name,
+                        variant_name,
+                        contained_functions,
+                    } => {
+                        air_vec.push(Air::DefineCyclicFuncs {
+                            func_name: func_name.clone(),
+                            module_name: module_name.clone(),
+                            variant_name: variant_name.clone(),
+                            contained_functions: contained_functions
+                                .iter()
+                                .map(|(params, _)| params.clone())
+                                .collect_vec(),
+                        });
+
+                        for (_, func_body) in contained_functions {
+                            func_body.create_air_vec(air_vec);
+                        }
                     }
                     AirStatement::AssertConstr {
                         constr,
@@ -1215,31 +1258,10 @@ impl AirTree {
                         arg.create_air_vec(air_vec);
                     }
                 }
-                AirExpression::RecordAccess {
-                    field_index,
-                    tipo,
-                    record,
-                } => {
-                    air_vec.push(Air::RecordAccess {
-                        record_index: *field_index,
-                        tipo: tipo.clone(),
-                    });
-                    record.create_air_vec(air_vec);
-                }
-                AirExpression::TupleIndex {
-                    tipo,
-                    tuple_index,
-                    tuple,
-                } => {
-                    air_vec.push(Air::TupleIndex {
-                        tipo: tipo.clone(),
-                        tuple_index: *tuple_index,
-                    });
-                    tuple.create_air_vec(air_vec);
-                }
-                AirExpression::ErrorTerm { tipo } => {
-                    air_vec.push(Air::ErrorTerm { tipo: tipo.clone() })
-                }
+                AirExpression::ErrorTerm { tipo, validator } => air_vec.push(Air::ErrorTerm {
+                    tipo: tipo.clone(),
+                    validator: *validator,
+                }),
                 AirExpression::Trace { tipo, msg, then } => {
                     air_vec.push(Air::Trace { tipo: tipo.clone() });
                     msg.create_air_vec(air_vec);
@@ -1274,9 +1296,7 @@ impl AirTree {
                 | AirExpression::If { tipo, .. }
                 | AirExpression::Constr { tipo, .. }
                 | AirExpression::RecordUpdate { tipo, .. }
-                | AirExpression::RecordAccess { tipo, .. }
-                | AirExpression::TupleIndex { tipo, .. }
-                | AirExpression::ErrorTerm { tipo }
+                | AirExpression::ErrorTerm { tipo, .. }
                 | AirExpression::Trace { tipo, .. } => tipo.clone(),
                 AirExpression::Void => void(),
                 AirExpression::Var { constructor, .. } => constructor.tipo.clone(),
@@ -1325,10 +1345,8 @@ impl AirTree {
                 | AirExpression::CastFromData { tipo, .. }
                 | AirExpression::CastToData { tipo, .. }
                 | AirExpression::If { tipo, .. }
-                | AirExpression::RecordAccess { tipo, .. }
                 | AirExpression::Constr { tipo, .. }
-                | AirExpression::TupleIndex { tipo, .. }
-                | AirExpression::ErrorTerm { tipo }
+                | AirExpression::ErrorTerm { tipo, .. }
                 | AirExpression::Trace { tipo, .. } => vec![tipo],
                 AirExpression::Var { constructor, .. } => {
                     vec![constructor.tipo.borrow_mut()]
@@ -1365,10 +1383,10 @@ impl AirTree {
     pub fn traverse_tree_with(
         &mut self,
         with: &mut impl FnMut(&mut AirTree, &TreePath),
-        apply_with_last: bool,
+        apply_with_func_last: bool,
     ) {
         let mut tree_path = TreePath::new();
-        self.do_traverse_tree_with(&mut tree_path, 0, 0, with, apply_with_last);
+        self.do_traverse_tree_with(&mut tree_path, 0, 0, with, apply_with_func_last);
     }
 
     pub fn traverse_tree_with_path(
@@ -1377,9 +1395,9 @@ impl AirTree {
         current_depth: usize,
         depth_index: usize,
         with: &mut impl FnMut(&mut AirTree, &TreePath),
-        apply_with_last: bool,
+        apply_with_func_last: bool,
     ) {
-        self.do_traverse_tree_with(path, current_depth, depth_index, with, apply_with_last);
+        self.do_traverse_tree_with(path, current_depth, depth_index, with, apply_with_func_last);
     }
 
     fn do_traverse_tree_with(
@@ -1388,7 +1406,7 @@ impl AirTree {
         current_depth: usize,
         depth_index: usize,
         with: &mut impl FnMut(&mut AirTree, &TreePath),
-        apply_with_last: bool,
+        apply_with_func_last: bool,
     ) {
         let mut index_count = IndexCounter::new();
         tree_path.push(current_depth, depth_index);
@@ -1401,7 +1419,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::DefineFunc { func_body, .. } => {
@@ -1410,16 +1428,31 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
+                AirStatement::DefineCyclicFuncs {
+                    contained_functions,
+                    ..
+                } => {
+                    for (_, func_body) in contained_functions {
+                        func_body.do_traverse_tree_with(
+                            tree_path,
+                            current_depth + 1,
+                            index_count.next_number(),
+                            with,
+                            apply_with_func_last,
+                        );
+                    }
+                }
+
                 AirStatement::AssertConstr { constr, .. } => {
                     constr.do_traverse_tree_with(
                         tree_path,
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::AssertBool { value, .. } => {
@@ -1428,7 +1461,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::ClauseGuard { pattern, .. } => {
@@ -1437,7 +1470,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::ListClauseGuard { .. } => {}
@@ -1448,7 +1481,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::ListAccessor { list, .. } => {
@@ -1457,7 +1490,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::ListExpose { .. } => {}
@@ -1467,7 +1500,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::NoOp => {}
@@ -1477,7 +1510,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirStatement::ListEmpty { list } => {
@@ -1486,13 +1519,13 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
             };
         }
 
-        if !apply_with_last {
+        if !apply_with_func_last {
             with(self, tree_path);
         }
 
@@ -1506,7 +1539,7 @@ impl AirTree {
                     current_depth + 1,
                     index_count.next_number(),
                     with,
-                    apply_with_last,
+                    apply_with_func_last,
                 );
             }
             AirTree::Expression(e) => match e {
@@ -1517,7 +1550,7 @@ impl AirTree {
                             current_depth + 1,
                             index_count.next_number(),
                             with,
-                            apply_with_last,
+                            apply_with_func_last,
                         );
                     }
                 }
@@ -1528,7 +1561,7 @@ impl AirTree {
                             current_depth + 1,
                             index_count.next_number(),
                             with,
-                            apply_with_last,
+                            apply_with_func_last,
                         );
                     }
                 }
@@ -1538,7 +1571,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     for arg in args {
@@ -1547,7 +1580,7 @@ impl AirTree {
                             current_depth + 1,
                             index_count.next_number(),
                             with,
-                            apply_with_last,
+                            apply_with_func_last,
                         );
                     }
                 }
@@ -1557,7 +1590,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::Builtin { args, .. } => {
@@ -1567,7 +1600,7 @@ impl AirTree {
                             current_depth + 1,
                             index_count.next_number(),
                             with,
-                            apply_with_last,
+                            apply_with_func_last,
                         );
                     }
                 }
@@ -1577,7 +1610,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     right.do_traverse_tree_with(
@@ -1585,7 +1618,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::UnOp { arg, .. } => {
@@ -1594,7 +1627,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::CastFromData { value, .. } => {
@@ -1603,7 +1636,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::CastToData { value, .. } => {
@@ -1612,7 +1645,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::When {
@@ -1623,7 +1656,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     clauses.do_traverse_tree_with(
@@ -1631,7 +1664,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::Clause {
@@ -1645,7 +1678,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     then.do_traverse_tree_with(
@@ -1653,7 +1686,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     otherwise.do_traverse_tree_with(
@@ -1661,7 +1694,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::ListClause {
@@ -1672,7 +1705,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     otherwise.do_traverse_tree_with(
@@ -1680,7 +1713,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::WrapClause { then, otherwise } => {
@@ -1689,7 +1722,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     otherwise.do_traverse_tree_with(
@@ -1697,7 +1730,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::TupleClause {
@@ -1708,7 +1741,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     otherwise.do_traverse_tree_with(
@@ -1716,7 +1749,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::Finally { pattern, then } => {
@@ -1725,7 +1758,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     then.do_traverse_tree_with(
@@ -1733,7 +1766,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::If {
@@ -1747,7 +1780,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     then.do_traverse_tree_with(
@@ -1755,7 +1788,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     otherwise.do_traverse_tree_with(
@@ -1763,7 +1796,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 AirExpression::Constr { args, .. } => {
@@ -1773,7 +1806,7 @@ impl AirTree {
                             current_depth + 1,
                             index_count.next_number(),
                             with,
-                            apply_with_last,
+                            apply_with_func_last,
                         );
                     }
                 }
@@ -1783,7 +1816,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                     for arg in args {
                         arg.do_traverse_tree_with(
@@ -1791,27 +1824,9 @@ impl AirTree {
                             current_depth + 1,
                             index_count.next_number(),
                             with,
-                            apply_with_last,
+                            apply_with_func_last,
                         );
                     }
-                }
-                AirExpression::RecordAccess { record, .. } => {
-                    record.do_traverse_tree_with(
-                        tree_path,
-                        current_depth + 1,
-                        index_count.next_number(),
-                        with,
-                        apply_with_last,
-                    );
-                }
-                AirExpression::TupleIndex { tuple, .. } => {
-                    tuple.do_traverse_tree_with(
-                        tree_path,
-                        current_depth + 1,
-                        index_count.next_number(),
-                        with,
-                        apply_with_last,
-                    );
                 }
                 AirExpression::Trace { msg, then, .. } => {
                     msg.do_traverse_tree_with(
@@ -1819,7 +1834,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
 
                     then.do_traverse_tree_with(
@@ -1827,7 +1842,7 @@ impl AirTree {
                         current_depth + 1,
                         index_count.next_number(),
                         with,
-                        apply_with_last,
+                        apply_with_func_last,
                     );
                 }
                 _ => {}
@@ -1835,7 +1850,7 @@ impl AirTree {
             a => unreachable!("GOT THIS {:#?}", a),
         }
 
-        if apply_with_last {
+        if apply_with_func_last {
             with(self, tree_path);
         }
 
@@ -1852,9 +1867,9 @@ impl AirTree {
         &'a mut self,
         tree_path_iter: &mut Iter<(usize, usize)>,
     ) -> &'a mut AirTree {
-        // For Finding the air node we skip over the define func ops since those are added later on.
+        // For finding the air node we skip over the define func ops since those are added later on.
         if let AirTree::Statement {
-            statement: AirStatement::DefineFunc { .. },
+            statement: AirStatement::DefineFunc { .. } | AirStatement::DefineCyclicFuncs { .. },
             hoisted_over: Some(hoisted_over),
         } = self
         {
@@ -1958,6 +1973,7 @@ impl AirTree {
                         }
                     }
                     AirStatement::DefineFunc { .. } => unreachable!(),
+                    AirStatement::DefineCyclicFuncs { .. } => unreachable!(),
                     AirStatement::FieldsEmpty { constr } => {
                         if *index == 0 {
                             constr.as_mut().do_find_air_tree_node(tree_path_iter)
@@ -2128,21 +2144,6 @@ impl AirTree {
 
                         item.do_find_air_tree_node(tree_path_iter)
                     }
-                    AirExpression::RecordAccess { record, .. } => {
-                        if *index == 0 {
-                            record.as_mut().do_find_air_tree_node(tree_path_iter)
-                        } else {
-                            panic!("Tree Path index outside tree children nodes")
-                        }
-                    }
-                    AirExpression::TupleIndex { tuple, .. } => {
-                        if *index == 0 {
-                            tuple.as_mut().do_find_air_tree_node(tree_path_iter)
-                        } else {
-                            panic!("Tree Path index outside tree children nodes")
-                        }
-                    }
-
                     AirExpression::Trace { msg, then, .. } => {
                         if *index == 0 {
                             msg.as_mut().do_find_air_tree_node(tree_path_iter)

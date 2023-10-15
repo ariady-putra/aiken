@@ -28,41 +28,40 @@ use crate::{
     tipo::Type,
 };
 
-use super::{
-    air::Air,
-    tree::{AirExpression, AirStatement, AirTree, TreePath},
-};
+use super::tree::{AirExpression, AirStatement, AirTree, TreePath};
+
+pub type Variant = String;
+
+pub type Params = Vec<String>;
+
+pub type CycleFunctionNames = Vec<String>;
+
+pub const TOO_MANY_ITEMS: &str = "__TOO_MANY_ITEMS";
+pub const LIST_NOT_EMPTY: &str = "__LIST_NOT_EMPTY";
+pub const CONSTR_NOT_EMPTY: &str = "__CONSTR_NOT_EMPTY";
+pub const INCORRECT_BOOLEAN: &str = "__INCORRECT_BOOLEAN";
+pub const INCORRECT_CONSTR: &str = "__INCORRECT_CONSTR";
+pub const CONSTR_INDEX_MISMATCH: &str = "__CONSTR_INDEX_MISMATCH";
 
 #[derive(Clone, Debug)]
 pub enum CodeGenFunction {
-    Function { body: AirTree, params: Vec<String> },
-    Link(String),
+    Function { body: AirTree, params: Params },
+    Link(Variant),
 }
 
 #[derive(Clone, Debug)]
-pub enum UserFunction {
+pub enum HoistableFunction {
     Function {
         body: AirTree,
-        deps: Vec<(FunctionAccessKey, String)>,
-        params: Vec<String>,
+        deps: Vec<(FunctionAccessKey, Variant)>,
+        params: Params,
     },
-    Link(String),
-}
-
-#[derive(Clone, Debug)]
-pub struct FuncComponents {
-    pub ir: Vec<Air>,
-    pub dependencies: Vec<FunctionAccessKey>,
-    pub args: Vec<String>,
-    pub recursive: bool,
-    pub defined_by_zero_arg: bool,
-    pub is_code_gen_func: bool,
-}
-
-#[derive(Clone, Eq, Debug, PartialEq, Hash)]
-pub struct ConstrFieldKey {
-    pub local_var: String,
-    pub field_name: String,
+    CyclicFunction {
+        functions: Vec<(Params, AirTree)>,
+        deps: Vec<(FunctionAccessKey, Variant)>,
+    },
+    Link((FunctionAccessKey, Variant)),
+    CyclicLink(FunctionAccessKey),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -70,8 +69,6 @@ pub struct DataTypeKey {
     pub module_name: String,
     pub defined_type: String,
 }
-
-pub type ConstrUsageKey = String;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct FunctionAccessKey {
@@ -188,6 +185,91 @@ impl ClauseProperties {
                 specific_clause: SpecificClause::ConstrClause,
             }
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeGenSpecialFuncs {
+    pub used_funcs: Vec<String>,
+    pub key_to_func: IndexMap<String, Term<Name>>,
+}
+
+impl CodeGenSpecialFuncs {
+    pub fn new() -> Self {
+        let mut key_to_func = IndexMap::new();
+
+        key_to_func.insert(
+            CONSTR_FIELDS_EXPOSER.to_string(),
+            Term::snd_pair()
+                .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
+                .lambda("__constr_var"),
+        );
+
+        key_to_func.insert(
+            CONSTR_INDEX_EXPOSER.to_string(),
+            Term::fst_pair()
+                .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
+                .lambda("__constr_var"),
+        );
+
+        key_to_func.insert(
+            TOO_MANY_ITEMS.to_string(),
+            Term::string("List/Tuple/Constr contains more items than expected"),
+        );
+
+        key_to_func.insert(
+            LIST_NOT_EMPTY.to_string(),
+            Term::string("Expected no items for List"),
+        );
+
+        key_to_func.insert(
+            CONSTR_NOT_EMPTY.to_string(),
+            Term::string("Expected no fields for Constr"),
+        );
+
+        key_to_func.insert(
+            INCORRECT_BOOLEAN.to_string(),
+            Term::string("Expected on incorrect Boolean variant"),
+        );
+
+        key_to_func.insert(
+            INCORRECT_CONSTR.to_string(),
+            Term::string("Expected on incorrect Constr variant"),
+        );
+
+        key_to_func.insert(
+            CONSTR_INDEX_MISMATCH.to_string(),
+            Term::string("Constr index didn't match a type variant"),
+        );
+
+        CodeGenSpecialFuncs {
+            used_funcs: vec![],
+            key_to_func,
+        }
+    }
+
+    pub fn use_function(&mut self, func_name: &'static str) -> &'static str {
+        if !self.used_funcs.contains(&func_name.to_string()) {
+            self.used_funcs.push(func_name.to_string());
+        }
+        func_name
+    }
+
+    pub fn get_function(&self, func_name: &String) -> Term<Name> {
+        self.key_to_func[func_name].clone()
+    }
+
+    pub fn apply_used_functions(&self, mut term: Term<Name>) -> Term<Name> {
+        for func_name in self.used_funcs.iter() {
+            term = term.lambda(func_name).apply(self.get_function(func_name));
+        }
+        term
+    }
+}
+
+impl Default for CodeGenSpecialFuncs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -763,6 +845,80 @@ pub fn modify_self_calls(
     recursive_nonstatics
 }
 
+pub fn modify_cyclic_calls(
+    body: &mut AirTree,
+    func_key: &FunctionAccessKey,
+    cyclic_links: &IndexMap<
+        (FunctionAccessKey, Variant),
+        (CycleFunctionNames, usize, FunctionAccessKey),
+    >,
+) {
+    body.traverse_tree_with(
+        &mut |air_tree: &mut AirTree, _| {
+            if let AirTree::Expression(AirExpression::Var {
+                constructor:
+                    ValueConstructor {
+                        variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                        tipo,
+                        ..
+                    },
+                variant_name,
+                ..
+            }) = air_tree
+            {
+                let tipo = tipo.clone();
+                let var_key = FunctionAccessKey {
+                    module_name: module.clone(),
+                    function_name: name.clone(),
+                };
+
+                if let Some((names, index, cyclic_name)) =
+                    cyclic_links.get(&(var_key.clone(), variant_name.to_string()))
+                {
+                    if *cyclic_name == *func_key {
+                        let cyclic_var_name = if cyclic_name.module_name.is_empty() {
+                            cyclic_name.function_name.to_string()
+                        } else {
+                            format!("{}_{}", cyclic_name.module_name, cyclic_name.function_name)
+                        };
+
+                        let index_name = names[*index].clone();
+
+                        let var = AirTree::var(
+                            ValueConstructor::public(
+                                tipo.clone(),
+                                ValueConstructorVariant::ModuleFn {
+                                    name: cyclic_var_name.clone(),
+                                    field_map: None,
+                                    module: "".to_string(),
+                                    arity: 2,
+                                    location: Span::empty(),
+                                    builtin: None,
+                                },
+                            ),
+                            cyclic_var_name,
+                            "".to_string(),
+                        );
+
+                        *air_tree = AirTree::call(
+                            var.clone(),
+                            tipo.clone(),
+                            vec![
+                                var,
+                                AirTree::anon_func(
+                                    names.clone(),
+                                    AirTree::local_var(index_name, tipo),
+                                ),
+                            ],
+                        );
+                    }
+                }
+            }
+        },
+        true,
+    );
+}
+
 pub fn pattern_has_conditions(
     pattern: &TypedPattern,
     data_types: &IndexMap<DataTypeKey, &TypedDataType>,
@@ -1201,27 +1357,16 @@ pub fn convert_type_to_data(term: Term<Name>, field_type: &Rc<Type>) -> Term<Nam
 
 #[allow(clippy::too_many_arguments)]
 pub fn list_access_to_uplc(
-    names: &[String],
+    names_types: &[(String, Rc<Type>)],
     id_list: &[u64],
     tail: bool,
     current_index: usize,
     term: Term<Name>,
-    tipos: Vec<Rc<Type>>,
     check_last_item: bool,
     is_list_accessor: bool,
-    tracing: bool,
+    error_term: Term<Name>,
 ) -> Term<Name> {
-    let trace_term = if tracing {
-        Term::Error.trace(Term::string(
-            "List/Tuple/Constr contains more items than expected",
-        ))
-    } else {
-        Term::Error
-    };
-
-    if let Some((first, names)) = names.split_first() {
-        let (current_tipo, tipos) = tipos.split_first().unwrap();
-
+    if let Some(((first, current_tipo), names_types)) = names_types.split_first() {
         let head_list =
             if matches!(current_tipo.get_uplc_type(), UplcType::Pair(_, _)) && is_list_accessor {
                 Term::head_list().apply(Term::var(format!(
@@ -1238,11 +1383,11 @@ pub fn list_access_to_uplc(
                 )
             };
 
-        if names.len() == 1 && tail {
-            if first == "_" && names[0] == "_" {
+        if names_types.len() == 1 && tail {
+            if first == "_" && names_types[0].0 == "_" {
                 term.lambda("_")
             } else if first == "_" {
-                term.lambda(names[0].clone())
+                term.lambda(&names_types[0].0)
                     .apply(Term::tail_list().apply(Term::var(format!(
                         "tail_index_{}_{}",
                         current_index, id_list[current_index]
@@ -1251,25 +1396,25 @@ pub fn list_access_to_uplc(
                         "tail_index_{}_{}",
                         current_index, id_list[current_index]
                     ))
-            } else if names[0] == "_" {
-                term.lambda(first.clone()).apply(head_list).lambda(format!(
+            } else if names_types[0].0 == "_" {
+                term.lambda(first).apply(head_list).lambda(format!(
                     "tail_index_{}_{}",
                     current_index, id_list[current_index]
                 ))
             } else {
-                term.lambda(names[0].clone())
+                term.lambda(&names_types[0].0)
                     .apply(Term::tail_list().apply(Term::var(format!(
                         "tail_index_{}_{}",
                         current_index, id_list[current_index]
                     ))))
-                    .lambda(first.clone())
+                    .lambda(first)
                     .apply(head_list)
                     .lambda(format!(
                         "tail_index_{}_{}",
                         current_index, id_list[current_index]
                     ))
             }
-        } else if names.is_empty() {
+        } else if names_types.is_empty() {
             if first == "_" {
                 if check_last_item {
                     Term::tail_list()
@@ -1277,7 +1422,7 @@ pub fn list_access_to_uplc(
                             "tail_index_{}_{}",
                             current_index, id_list[current_index]
                         )))
-                        .delayed_choose_list(term, trace_term)
+                        .delayed_choose_list(term, error_term)
                 } else {
                     term
                 }
@@ -1293,7 +1438,7 @@ pub fn list_access_to_uplc(
                             "tail_index_{}_{}",
                             current_index, id_list[current_index]
                         )))
-                        .delayed_choose_list(term, trace_term)
+                        .delayed_choose_list(term, error_term)
                 } else {
                     term
                 }
@@ -1306,15 +1451,14 @@ pub fn list_access_to_uplc(
             }
         } else if first == "_" {
             let mut list_access_inner = list_access_to_uplc(
-                names,
+                names_types,
                 id_list,
                 tail,
                 current_index + 1,
                 term,
-                tipos.to_owned(),
                 check_last_item,
                 is_list_accessor,
-                tracing,
+                error_term,
             );
 
             list_access_inner = match &list_access_inner {
@@ -1345,15 +1489,14 @@ pub fn list_access_to_uplc(
             }
         } else {
             let mut list_access_inner = list_access_to_uplc(
-                names,
+                names_types,
                 id_list,
                 tail,
                 current_index + 1,
                 term,
-                tipos.to_owned(),
                 check_last_item,
                 is_list_accessor,
-                tracing,
+                error_term,
             );
 
             list_access_inner = match &list_access_inner {
@@ -1556,20 +1699,68 @@ pub fn special_case_builtin(
     }
 }
 
-pub fn wrap_as_multi_validator(spend: Term<Name>, mint: Term<Name>) -> Term<Name> {
-    Term::equals_integer()
-        .apply(Term::integer(0.into()))
-        .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var("__second_arg")))
-        .delayed_if_else(
-            mint.apply(Term::var("__first_arg"))
-                .apply(Term::var("__second_arg")),
-            spend.apply(Term::var("__first_arg")).apply(
-                Term::head_list()
-                    .apply(Term::var(CONSTR_FIELDS_EXPOSER).apply(Term::var("__second_arg"))),
-            ),
-        )
-        .lambda("__second_arg")
-        .lambda("__first_arg")
+pub fn wrap_as_multi_validator(
+    spend: Term<Name>,
+    mint: Term<Name>,
+    trace: bool,
+    spend_name: String,
+    mint_name: String,
+) -> Term<Name> {
+    if trace {
+        let trace_string = format!(
+            "Incorrect redeemer type for validator {}. 
+            Double check you have wrapped the redeemer type as specified in your plutus.json",
+            spend_name
+        );
+
+        let error_term = Term::Error.trace(Term::var("__incorrect_second_arg_type"));
+
+        Term::var("__second_arg")
+            .delayed_choose_data(
+                Term::equals_integer()
+                    .apply(Term::integer(0.into()))
+                    .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var("__second_arg")))
+                    .delayed_if_else(
+                        mint.apply(Term::var("__first_arg"))
+                            .apply(Term::var("__second_arg"))
+                            .trace(Term::string(format!(
+                                "Running 2 arg validator {}",
+                                mint_name
+                            ))),
+                        spend
+                            .apply(Term::var("__first_arg"))
+                            .apply(Term::head_list().apply(
+                                Term::var(CONSTR_FIELDS_EXPOSER).apply(Term::var("__second_arg")),
+                            ))
+                            .trace(Term::string(format!(
+                                "Running 3 arg validator {}",
+                                spend_name
+                            ))),
+                    ),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term,
+            )
+            .lambda("__incorrect_second_arg_type")
+            .apply(Term::string(trace_string))
+            .lambda("__second_arg")
+            .lambda("__first_arg")
+    } else {
+        Term::equals_integer()
+            .apply(Term::integer(0.into()))
+            .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var("__second_arg")))
+            .delayed_if_else(
+                mint.apply(Term::var("__first_arg"))
+                    .apply(Term::var("__second_arg")),
+                spend.apply(Term::var("__first_arg")).apply(
+                    Term::head_list()
+                        .apply(Term::var(CONSTR_FIELDS_EXPOSER).apply(Term::var("__second_arg"))),
+                ),
+            )
+            .lambda("__second_arg")
+            .lambda("__first_arg")
+    }
 }
 
 /// If the pattern is a list the return the number of elements and if it has a tail
@@ -1607,9 +1798,17 @@ pub fn cast_validator_args(term: Term<Name>, arguments: &[TypedArg]) -> Term<Nam
     term
 }
 
-pub fn wrap_validator_condition(air_tree: AirTree) -> AirTree {
+pub fn wrap_validator_condition(air_tree: AirTree, trace: bool) -> AirTree {
     let success_branch = vec![(air_tree, AirTree::void())];
-    let otherwise = AirTree::error(void());
+    let otherwise = if trace {
+        AirTree::trace(
+            AirTree::string("Validator returned false"),
+            void(),
+            AirTree::error(void(), true),
+        )
+    } else {
+        AirTree::error(void(), true)
+    };
 
     AirTree::if_branches(success_branch, void(), otherwise)
 }

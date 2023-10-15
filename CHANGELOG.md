@@ -1,20 +1,73 @@
 # Changelog
 
-## v1.0.17-alpha - unreleased
+## v1.0.20-alpha - unreleased
 
 ### Added
 
-- **aiken**: add ability to force warnings to cause a failing exit code on check, build, and docs
-- **aiken-lang**: automatically resolve and fetch latest revision of a package on build when a branch is specified as version
+- **aiken-project**: The `plutus.json` blueprint now contains a `compiler.name` and `compiler.version` fields.
+- **aiken-prokect**: Add compiler and system information to panic error report.
+
+### Changed
+
+- **aiken-lang**: Added validator specific error when validator returns false
 
 ### Fixed
 
-- **uplc**: trim whitespace when loading files with hex strings to avoid confusing errors #720
+- **aiken-lang**: improved error messages for `a |> b(x)`
+
+## v1.0.19-alpha - 2023-09-29
+
+### Fixed
+
+- **aiken-lang**: Fixed small typo in `hoist_dependent_functions` lead to
+  internal cyclic calls not being recognized.
+
+## v1.0.18-alpha - 2023-09-29
+
+### Added
+
+- **aiken-lang**: Code gen now allows for mutual recursion
+
+### Fixed
+
+- **aiken-lang**: fixed stack overflow with unbound typing being passed into a
+  function with inferred types
+- **aiken-lang**: expect on tuples greater than 2 checks the length to ensure
+  tuple lists are the same length as the type.
+
+### Changed
+
+- **aiken-lang**: (Code Gen): Rename some of the types to use aliases
+- **aiken-lang**: (Code Gen): Remove the use of Air::RecordAccess and TupleIndex
+  and replace them with functions that directly get the item at the specified
+  index. Also improves performance.
+- **uplc**: Added more cases to the inline optimization function to allow the
+  removal of further unnecessary lambda bindings.
+
+## v1.0.17-alpha - 2023-09-20
+
+### Added
+
+- **aiken**: add ability to force warnings to cause a failing exit code on
+  check, build, and docs
+- **aiken-lang**: automatically resolve and fetch latest revision of a package
+  on build when a branch is specified as version
+- **uplc**: Add Case and Constr Terms; This includes their flat serialization
+  and evaluation
+
+### Fixed
+
+- **uplc**: trim whitespace when loading files with hex strings to avoid
+  confusing errors #720
 - **uplc**: uplc `Constant::Data` formatting
+- **aiken-lang**: code gen fixes including nested constr when matches and expect
+  on None
 - **aiken-lang**: empty records properly parse as record sugar
 - **aiken-lang**: escape sequences are now properly preserved after formatting
-- **aiken-lang**: fixed parser ambiguity when using record constructor in if conditions followed by single-line var expressions #735
-- **aiken-project**: when a module name has a hyphen we should behave like rust and force an underscore
+- **aiken-lang**: fixed parser ambiguity when using record constructor in if
+  conditions followed by single-line var expressions #735
+- **aiken-project**: when a module name has a hyphen we should behave like rust
+  and force an underscore
 
 ## v1.0.16-alpha - 2023-08-24
 

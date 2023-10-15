@@ -32,6 +32,13 @@
 
           cargoLock.lockFile = ./Cargo.lock;
 
+          GIT_COMMIT_HASH_SHORT = self.shortRev or "unknown";
+          postPatch = ''
+            substituteInPlace crates/aiken/src/cmd/mod.rs \
+              --replace  "built_info::GIT_COMMIT_HASH_SHORT" \
+              "Some(\"$GIT_COMMIT_HASH_SHORT\")"
+          '';
+          
           postInstall = ''
             mkdir -p $out/share/zsh/site-functions
             $out/bin/aiken completion zsh > $out/share/zsh/site-functions/_aiken

@@ -93,7 +93,7 @@ jobs:
       - name: Linux AMD setup
         if: ${{ matrix.job.target == 'x86_64-unknown-linux-gnu' }}
         run: |
-          echo "RUSTFLAGS='-C target-feature=+crt-static'" >> $GITHUB_ENV
+          echo "RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
 
       - name: Linux ARM setup
         if: ${{ matrix.job.target == 'aarch64-unknown-linux-gnu' }}
@@ -101,12 +101,12 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y gcc-aarch64-linux-gnu libssl-dev:armhf
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "RUSTFLAGS='-C target-feature=+crt-static'" >> $GITHUB_ENV
+          echo "RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
 
       - name: Windows setup
         if: ${{ matrix.job.os == 'windows-latest' }}
         run: |
-          echo "RUSTFLAGS='-C target-feature=+crt-static'" >> $GITHUB_ENV
+          echo "RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
 
       - name: Build binaries
         uses: actions-rs/cargo@v1

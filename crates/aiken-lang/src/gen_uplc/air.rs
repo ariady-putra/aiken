@@ -50,6 +50,13 @@ pub enum Air {
         recursive_nonstatic_params: Vec<String>,
         variant_name: String,
     },
+    DefineCyclicFuncs {
+        func_name: String,
+        module_name: String,
+        variant_name: String,
+        // just the params
+        contained_functions: Vec<Vec<String>>,
+    },
     Fn {
         params: Vec<String>,
     },
@@ -140,10 +147,6 @@ pub enum Air {
         tipo: Rc<Type>,
     },
     // Field Access
-    RecordAccess {
-        record_index: u64,
-        tipo: Rc<Type>,
-    },
     FieldsExpose {
         indices: Vec<(usize, String, Rc<Type>)>,
         check_last_item: bool,
@@ -166,13 +169,10 @@ pub enum Air {
         tipo: Rc<Type>,
         check_last_item: bool,
     },
-    TupleIndex {
-        tipo: Rc<Type>,
-        tuple_index: usize,
-    },
     // Misc.
     ErrorTerm {
         tipo: Rc<Type>,
+        validator: bool,
     },
     Trace {
         tipo: Rc<Type>,
