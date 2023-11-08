@@ -1,3 +1,4 @@
+use crate::quickfix::Quickfix;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -6,6 +7,7 @@ use std::{
 
 use aiken_lang::{
     ast::{Definition, Located, ModuleKind, Span, Use},
+    error::ExtraData,
     parser,
     tipo::pretty::Printer,
 };
@@ -23,7 +25,8 @@ use lsp_types::{
         Notification, Progress, PublishDiagnostics, ShowMessage,
     },
     request::{
-        Completion, Formatting, GotoDefinition, HoverRequest, Request, WorkDoneProgressCreate,
+        CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest, Request,
+        WorkDoneProgressCreate,
     },
     DocumentFormattingParams, InitializeParams, TextEdit,
 };
@@ -33,6 +36,7 @@ use crate::{
     cast::{cast_notification, cast_request},
     error::Error as ServerError,
     line_numbers::LineNumbers,
+    quickfix,
     utils::{
         path_to_uri, span_to_lsp_range, text_edit_replace, uri_to_module_name,
         COMPILING_PROGRESS_TOKEN, CREATE_COMPILING_PROGRESS_TOKEN,
@@ -41,7 +45,7 @@ use crate::{
 
 use self::lsp_project::LspProject;
 
-mod lsp_project;
+pub mod lsp_project;
 pub mod telemetry;
 
 #[allow(dead_code)]
@@ -288,6 +292,7 @@ impl Server {
                     }
                 }
             }
+
             HoverRequest::METHOD => {
                 let params = cast_request::<HoverRequest>(request)?;
 
@@ -324,6 +329,51 @@ impl Server {
                 })
             }
 
+            CodeActionRequest::METHOD => {
+                let mut actions = Vec::new();
+
+                if let Some(ref compiler) = self.compiler {
+                    let params = cast_request::<CodeActionRequest>(request)
+                        .expect("cast code action request");
+
+                    let mut unused_imports = Vec::new();
+
+                    for diagnostic in params.context.diagnostics.into_iter() {
+                        match quickfix::assert(diagnostic) {
+                            None => (),
+                            Some(Quickfix::UnusedImports(diagnostics)) => {
+                                unused_imports.extend(diagnostics);
+                            }
+                            Some(strategy) => {
+                                let quickfixes =
+                                    quickfix::quickfix(compiler, &params.text_document, &strategy);
+                                actions.extend(quickfixes);
+                            }
+                        }
+                    }
+
+                    // NOTE: We handle unused imports separately because we want them to be done in
+                    // a single action. Otherwise they might mess up with spans and alignments as
+                    // they remove content from the document.
+                    // Plus, it's also just much more convenient that way instead of removing each
+                    // import one-by-one.
+                    if !unused_imports.is_empty() {
+                        let quickfixes = quickfix::quickfix(
+                            compiler,
+                            &params.text_document,
+                            &Quickfix::UnusedImports(unused_imports),
+                        );
+                        actions.extend(quickfixes);
+                    }
+                }
+
+                Ok(lsp_server::Response {
+                    id,
+                    error: None,
+                    result: Some(serde_json::to_value(actions)?),
+                })
+            }
+
             unsupported => Err(ServerError::UnsupportedLspRequest {
                 request: unsupported.to_string(),
             }),
@@ -343,6 +393,9 @@ impl Server {
             None | Some(Located::Definition(Definition::Use(Use { .. }))) => {
                 self.completion_for_import()
             }
+
+            // TODO: autocompletion for patterns
+            Some(Located::Pattern(_pattern, _value)) => None,
 
             // TODO: autocompletion for other definitions
             Some(Located::Definition(_expression)) => None,
@@ -442,7 +495,6 @@ impl Server {
     fn module_for_uri(&self, uri: &url::Url) -> Option<&CheckedModule> {
         self.compiler.as_ref().and_then(|compiler| {
             let module_name = uri_to_module_name(uri, &self.root).expect("uri to module name");
-
             compiler.modules.get(&module_name)
         })
     }
@@ -458,13 +510,17 @@ impl Server {
             None => return Ok(None),
         };
 
-        let expression = match found {
-            Located::Expression(expression) => expression,
+        let (location, definition_location, tipo) = match found {
+            Located::Expression(expression) => (
+                expression.location(),
+                expression.definition_location(),
+                Some(expression.tipo()),
+            ),
+            Located::Pattern(pattern, value) => (pattern.location(), None, pattern.tipo(value)),
             Located::Definition(_) => return Ok(None),
         };
 
-        let doc = expression
-            .definition_location()
+        let doc = definition_location
             .and_then(|loc| loc.module.map(|m| (m, loc.span)))
             .and_then(|(m, span)| {
                 self.compiler
@@ -475,12 +531,16 @@ impl Server {
             .and_then(|(checked_module, span)| checked_module.ast.find_node(span.start))
             .and_then(|node| match node {
                 Located::Expression(_) => None,
+                Located::Pattern(_, _) => None,
                 Located::Definition(def) => def.doc(),
             })
             .unwrap_or_default();
 
         // Show the type of the hovered node to the user
-        let type_ = Printer::new().pretty_print(expression.tipo().as_ref(), 0);
+        let type_ = match tipo {
+            Some(t) => Printer::new().pretty_print(t.as_ref(), 0),
+            None => "?".to_string(),
+        };
 
         let contents = formatdoc! {r#"
             ```aiken
@@ -491,7 +551,7 @@ impl Server {
 
         Ok(Some(lsp_types::Hover {
             contents: lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(contents)),
-            range: Some(span_to_lsp_range(expression.location(), &line_numbers)),
+            range: Some(span_to_lsp_range(location, &line_numbers)),
         }))
     }
 
@@ -580,7 +640,7 @@ impl Server {
     /// the `showMessage` notification instead.
     fn process_diagnostic<E>(&mut self, error: E) -> Result<(), ServerError>
     where
-        E: Diagnostic + GetSource,
+        E: Diagnostic + GetSource + ExtraData,
     {
         let (severity, typ) = match error.severity() {
             Some(severity) => match severity {
@@ -631,7 +691,7 @@ impl Server {
                     message,
                     related_information: None,
                     tags: None,
-                    data: None,
+                    data: error.extra_data().map(serde_json::Value::String),
                 };
 
                 #[cfg(not(target_os = "windows"))]

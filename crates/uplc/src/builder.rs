@@ -76,181 +76,47 @@ impl<T> Term<T> {
         )
     }
 
-    // Builtins
-    pub fn constr_data() -> Self {
-        Term::Builtin(DefaultFunction::ConstrData)
-    }
-
-    pub fn map_data() -> Self {
-        Term::Builtin(DefaultFunction::MapData)
-    }
-
-    pub fn list_data() -> Self {
-        Term::Builtin(DefaultFunction::ListData)
-    }
-
-    pub fn b_data() -> Self {
-        Term::Builtin(DefaultFunction::BData)
-    }
-
-    pub fn i_data() -> Self {
-        Term::Builtin(DefaultFunction::IData)
-    }
-
-    pub fn unconstr_data() -> Self {
-        Term::Builtin(DefaultFunction::UnConstrData)
-    }
-
-    pub fn un_i_data() -> Self {
-        Term::Builtin(DefaultFunction::UnIData)
-    }
-
-    pub fn un_b_data() -> Self {
-        Term::Builtin(DefaultFunction::UnBData)
-    }
-
-    pub fn unmap_data() -> Self {
-        Term::Builtin(DefaultFunction::UnMapData)
-    }
-
-    pub fn unlist_data() -> Self {
-        Term::Builtin(DefaultFunction::UnListData)
-    }
-
-    pub fn equals_integer() -> Self {
-        Term::Builtin(DefaultFunction::EqualsInteger)
-    }
-
-    pub fn less_than_integer() -> Self {
-        Term::Builtin(DefaultFunction::LessThanInteger)
-    }
-
-    pub fn less_than_equals_integer() -> Self {
-        Term::Builtin(DefaultFunction::LessThanEqualsInteger)
-    }
-
-    pub fn equals_string() -> Self {
-        Term::Builtin(DefaultFunction::EqualsString)
-    }
-
-    pub fn equals_bytestring() -> Self {
-        Term::Builtin(DefaultFunction::EqualsByteString)
-    }
-
-    pub fn less_than_bytearray() -> Self {
-        Term::Builtin(DefaultFunction::LessThanByteString)
-    }
-
-    pub fn less_than_equals_bytearray() -> Self {
-        Term::Builtin(DefaultFunction::LessThanEqualsByteString)
-    }
-
-    pub fn equals_data() -> Self {
-        Term::Builtin(DefaultFunction::EqualsData)
-    }
+    // This section contains builders for builtins from default functions
+    // Theses are in _alphabetical order_
+    // The naming convention almost follows PascalCase -> snake_case
+    // Exceptions include the use of `un`.
 
     pub fn add_integer() -> Self {
         Term::Builtin(DefaultFunction::AddInteger)
-    }
-
-    pub fn sub_integer() -> Self {
-        Term::Builtin(DefaultFunction::SubtractInteger)
-    }
-
-    pub fn div_integer() -> Self {
-        Term::Builtin(DefaultFunction::DivideInteger)
-    }
-
-    pub fn mod_integer() -> Self {
-        Term::Builtin(DefaultFunction::ModInteger)
-    }
-
-    pub fn length_of_bytearray() -> Self {
-        Term::Builtin(DefaultFunction::LengthOfByteString)
-    }
-
-    pub fn cons_bytearray() -> Self {
-        Term::Builtin(DefaultFunction::ConsByteString)
-    }
-
-    pub fn slice_bytearray() -> Self {
-        Term::Builtin(DefaultFunction::SliceByteString)
     }
 
     pub fn append_bytearray() -> Self {
         Term::Builtin(DefaultFunction::AppendByteString)
     }
 
-    pub fn index_bytearray() -> Self {
-        Term::Builtin(DefaultFunction::IndexByteString)
+    pub fn append_string() -> Self {
+        Term::Builtin(DefaultFunction::AppendString)
     }
 
-    pub fn sha2_256() -> Self {
-        Term::Builtin(DefaultFunction::Sha2_256)
-    }
-
-    pub fn sha3_256() -> Self {
-        Term::Builtin(DefaultFunction::Sha3_256)
+    pub fn b_data() -> Self {
+        Term::Builtin(DefaultFunction::BData)
     }
 
     pub fn blake2b_256() -> Self {
         Term::Builtin(DefaultFunction::Blake2b_256)
     }
 
-    pub fn verify_ed25519_signature() -> Self {
-        Term::Builtin(DefaultFunction::VerifyEd25519Signature)
-    }
-
-    pub fn verify_ecdsa_secp256k1_signature() -> Self {
-        Term::Builtin(DefaultFunction::VerifyEcdsaSecp256k1Signature)
-    }
-
-    pub fn verify_schnorr_secp256k1_signature() -> Self {
-        Term::Builtin(DefaultFunction::VerifySchnorrSecp256k1Signature)
-    }
-
-    pub fn decode_utf8() -> Self {
-        Term::Builtin(DefaultFunction::DecodeUtf8)
-    }
-
-    pub fn append_string() -> Self {
-        Term::Builtin(DefaultFunction::AppendString)
-    }
-
-    pub fn encode_utf8() -> Self {
-        Term::Builtin(DefaultFunction::EncodeUtf8)
-    }
-
-    pub fn head_list() -> Self {
-        Term::Builtin(DefaultFunction::HeadList).force()
-    }
-
-    pub fn tail_list() -> Self {
-        Term::Builtin(DefaultFunction::TailList).force()
-    }
-
-    pub fn mk_cons() -> Self {
-        Term::Builtin(DefaultFunction::MkCons).force()
-    }
-
-    pub fn fst_pair() -> Self {
-        Term::Builtin(DefaultFunction::FstPair).force().force()
-    }
-
-    pub fn snd_pair() -> Self {
-        Term::Builtin(DefaultFunction::SndPair).force().force()
-    }
-
-    pub fn mk_pair_data() -> Self {
-        Term::Builtin(DefaultFunction::MkPairData)
-    }
-
-    pub fn if_else(self, then_term: Self, else_term: Self) -> Self {
-        Term::Builtin(DefaultFunction::IfThenElse)
+    pub fn choose_data(
+        self,
+        constr_case: Self,
+        map_case: Self,
+        array_case: Self,
+        int_case: Self,
+        bytes_case: Self,
+    ) -> Self {
+        Term::Builtin(DefaultFunction::ChooseData)
             .force()
             .apply(self)
-            .apply(then_term)
-            .apply(else_term)
+            .apply(constr_case)
+            .apply(map_case)
+            .apply(array_case)
+            .apply(int_case)
+            .apply(bytes_case)
     }
 
     pub fn choose_list(self, then_term: Self, else_term: Self) -> Self {
@@ -269,33 +135,193 @@ impl<T> Term<T> {
             .apply(then_term)
     }
 
-    pub fn delayed_choose_unit(self, then_term: Self) -> Self {
-        Term::Builtin(DefaultFunction::ChooseUnit)
-            .force()
-            .apply(self)
-            .apply(then_term.delay())
-            .force()
+    pub fn cons_bytearray() -> Self {
+        Term::Builtin(DefaultFunction::ConsByteString)
     }
 
-    pub fn delayed_if_else(self, then_term: Self, else_term: Self) -> Self {
+    pub fn constr_data() -> Self {
+        Term::Builtin(DefaultFunction::ConstrData)
+    }
+
+    pub fn decode_utf8() -> Self {
+        Term::Builtin(DefaultFunction::DecodeUtf8)
+    }
+
+    pub fn div_integer() -> Self {
+        Term::Builtin(DefaultFunction::DivideInteger)
+    }
+
+    pub fn divide_integer() -> Self {
+        Term::Builtin(DefaultFunction::DivideInteger)
+    }
+
+    pub fn encode_utf8() -> Self {
+        Term::Builtin(DefaultFunction::EncodeUtf8)
+    }
+
+    pub fn equals_bytestring() -> Self {
+        Term::Builtin(DefaultFunction::EqualsByteString)
+    }
+
+    pub fn equals_data() -> Self {
+        Term::Builtin(DefaultFunction::EqualsData)
+    }
+
+    pub fn equals_integer() -> Self {
+        Term::Builtin(DefaultFunction::EqualsInteger)
+    }
+
+    pub fn equals_string() -> Self {
+        Term::Builtin(DefaultFunction::EqualsString)
+    }
+
+    pub fn fst_pair() -> Self {
+        Term::Builtin(DefaultFunction::FstPair).force().force()
+    }
+
+    pub fn head_list() -> Self {
+        Term::Builtin(DefaultFunction::HeadList).force()
+    }
+
+    pub fn i_data() -> Self {
+        Term::Builtin(DefaultFunction::IData)
+    }
+
+    pub fn if_then_else(self, then_term: Self, else_term: Self) -> Self {
         Term::Builtin(DefaultFunction::IfThenElse)
             .force()
             .apply(self)
-            .apply(then_term.delay())
-            .apply(else_term.delay())
-            .force()
+            .apply(then_term)
+            .apply(else_term)
     }
 
-    pub fn delayed_choose_list(self, then_term: Self, else_term: Self) -> Self {
-        Term::Builtin(DefaultFunction::ChooseList)
-            .force()
-            .force()
-            .apply(self)
-            .apply(then_term.delay())
-            .apply(else_term.delay())
-            .force()
+    pub fn index_bytearray() -> Self {
+        Term::Builtin(DefaultFunction::IndexByteString)
     }
 
+    pub fn length_of_bytearray() -> Self {
+        Term::Builtin(DefaultFunction::LengthOfByteString)
+    }
+
+    pub fn less_than_bytearray() -> Self {
+        Term::Builtin(DefaultFunction::LessThanByteString)
+    }
+
+    pub fn less_than_equals_bytearray() -> Self {
+        Term::Builtin(DefaultFunction::LessThanEqualsByteString)
+    }
+
+    pub fn less_than_equals_integer() -> Self {
+        Term::Builtin(DefaultFunction::LessThanEqualsInteger)
+    }
+
+    pub fn less_than_integer() -> Self {
+        Term::Builtin(DefaultFunction::LessThanInteger)
+    }
+
+    pub fn list_data() -> Self {
+        Term::Builtin(DefaultFunction::ListData)
+    }
+
+    pub fn map_data() -> Self {
+        Term::Builtin(DefaultFunction::MapData)
+    }
+
+    pub fn mk_cons() -> Self {
+        Term::Builtin(DefaultFunction::MkCons).force()
+    }
+
+    pub fn mk_pair_data() -> Self {
+        Term::Builtin(DefaultFunction::MkPairData)
+    }
+
+    pub fn mod_integer() -> Self {
+        Term::Builtin(DefaultFunction::ModInteger)
+    }
+
+    pub fn multiply_integer() -> Self {
+        Term::Builtin(DefaultFunction::MultiplyInteger)
+    }
+
+    pub fn quotient_integer() -> Self {
+        Term::Builtin(DefaultFunction::QuotientInteger)
+    }
+
+    pub fn remainder_integer() -> Self {
+        Term::Builtin(DefaultFunction::RemainderInteger)
+    }
+
+    pub fn sha2_256() -> Self {
+        Term::Builtin(DefaultFunction::Sha2_256)
+    }
+
+    pub fn sha3_256() -> Self {
+        Term::Builtin(DefaultFunction::Sha3_256)
+    }
+
+    pub fn slice_bytearray() -> Self {
+        Term::Builtin(DefaultFunction::SliceByteString)
+    }
+
+    pub fn snd_pair() -> Self {
+        Term::Builtin(DefaultFunction::SndPair).force().force()
+    }
+
+    pub fn subtract_integer() -> Self {
+        Term::Builtin(DefaultFunction::SubtractInteger)
+    }
+
+    pub fn tail_list() -> Self {
+        Term::Builtin(DefaultFunction::TailList).force()
+    }
+
+    pub fn un_b_data() -> Self {
+        Term::Builtin(DefaultFunction::UnBData)
+    }
+
+    pub fn un_i_data() -> Self {
+        Term::Builtin(DefaultFunction::UnIData)
+    }
+
+    pub fn unconstr_data() -> Self {
+        Term::Builtin(DefaultFunction::UnConstrData)
+    }
+
+    pub fn unlist_data() -> Self {
+        Term::Builtin(DefaultFunction::UnListData)
+    }
+    pub fn unmap_data() -> Self {
+        Term::Builtin(DefaultFunction::UnMapData)
+    }
+
+    pub fn verify_ecdsa_secp256k1_signature() -> Self {
+        Term::Builtin(DefaultFunction::VerifyEcdsaSecp256k1Signature)
+    }
+
+    pub fn verify_ed25519_signature() -> Self {
+        Term::Builtin(DefaultFunction::VerifyEd25519Signature)
+    }
+
+    pub fn verify_schnorr_secp256k1_signature() -> Self {
+        Term::Builtin(DefaultFunction::VerifySchnorrSecp256k1Signature)
+    }
+
+    // Unused bultins
+    pub fn mk_nil_data() -> Self {
+        Term::Builtin(DefaultFunction::MkNilData)
+    }
+    pub fn mk_nil_pair_data() -> Self {
+        Term::Builtin(DefaultFunction::MkNilPairData)
+    }
+    pub fn null_list() -> Self {
+        Term::Builtin(DefaultFunction::NullList)
+    }
+    pub fn serialise_data() -> Self {
+        Term::Builtin(DefaultFunction::SerialiseData)
+    }
+}
+
+impl<T> Term<T> {
     pub fn delayed_choose_data(
         self,
         constr_case: Self,
@@ -315,7 +341,34 @@ impl<T> Term<T> {
             .force()
     }
 
-    pub fn trace(self, msg_term: Self) -> Self {
+    pub fn delayed_choose_list(self, then_term: Self, else_term: Self) -> Self {
+        Term::Builtin(DefaultFunction::ChooseList)
+            .force()
+            .force()
+            .apply(self)
+            .apply(then_term.delay())
+            .apply(else_term.delay())
+            .force()
+    }
+
+    pub fn delayed_choose_unit(self, then_term: Self) -> Self {
+        Term::Builtin(DefaultFunction::ChooseUnit)
+            .force()
+            .apply(self)
+            .apply(then_term.delay())
+            .force()
+    }
+
+    pub fn delayed_if_then_else(self, then_term: Self, else_term: Self) -> Self {
+        Term::Builtin(DefaultFunction::IfThenElse)
+            .force()
+            .apply(self)
+            .apply(then_term.delay())
+            .apply(else_term.delay())
+            .force()
+    }
+
+    pub fn delayed_trace(self, msg_term: Self) -> Self {
         Term::Builtin(DefaultFunction::Trace)
             .force()
             .apply(msg_term)
@@ -323,6 +376,7 @@ impl<T> Term<T> {
             .force()
     }
 
+    // Misc.
     pub fn repeat_tail_list(self, repeat: usize) -> Self {
         let mut term = self;
 
@@ -346,6 +400,7 @@ impl Term<Name> {
         Term::Var(Name::text(name).into())
     }
 
+    // Misc.
     pub fn constr_fields_exposer(self) -> Self {
         self.lambda(CONSTR_FIELDS_EXPOSER).apply(
             Term::snd_pair()
