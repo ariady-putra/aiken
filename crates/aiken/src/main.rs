@@ -1,12 +1,13 @@
-use aiken::cmd::{
+use aiken_project::{config, pretty};
+use cmd::{
     blueprint::{self, address},
     build, check, completion, docs, fmt, lsp, new,
     packages::{self, add},
     tx, uplc, Cmd,
 };
-use aiken_project::{config, pretty};
-
 use owo_colors::OwoColorize;
+
+mod cmd;
 
 fn main() -> miette::Result<()> {
     panic_handler();

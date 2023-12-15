@@ -21,6 +21,24 @@ fn format_simple_module() {
 }
 
 #[test]
+fn format_g1_element_constant() {
+    assert_format!(
+        r#"
+        pub const point = #<Bls12_381, G1>"950dfd33da2682260c76038dfb8bad6e84ae9d599a3c151815945ac1e6ef6b1027cd917f3907479d20d636ce437a41f5"
+        "#
+    );
+}
+
+#[test]
+fn format_g2_element_constant() {
+    assert_format!(
+        r#"
+        pub const point = #<Bls12_381, G2>"b0629fa1158c2d23a10413fe91d381a84d25e31d041cd0377d25828498fd02011b35893938ced97535395e4815201e67108bcd4665e0db25d602d76fa791fab706c54abf5e1a9e44b4ac1e6badf3d2ac0328f5e30be341677c8bac5dda7682f1"
+        "#
+    );
+}
+
+#[test]
 fn format_logical_op_chain() {
     assert_format!(
         r#"
@@ -41,6 +59,77 @@ fn format_if() {
             list.map(xs, fn (x) { if x > 0 { "foo" } else { "bar" } })
         }
     "#
+    );
+}
+
+#[test]
+fn format_logic_op_with_code_block() {
+    assert_format!(
+        r#"
+        fn foo() {
+          True || {
+            let bar = 1
+            bar == bar
+          }
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_grouped_expression() {
+    assert_format!(
+        r#"
+        fn foo() {
+           y == { x |> f }
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_grouped_expression_2() {
+    assert_format!(
+        r#"
+        fn foo() {
+           ( y == x ) |> f
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_grouped_expression_3() {
+    assert_format!(
+        r#"
+        fn foo() {
+          { x |> f } == y
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_grouped_expression_4() {
+    assert_format!(
+        r#"
+        fn foo() {
+          x |> { f == y }
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_preserve_newline_after_bool_expect() {
+    assert_format!(
+        r#"
+        fn foo() {
+          expect 1 == 1
+
+          False
+        }
+        "#
     );
 }
 

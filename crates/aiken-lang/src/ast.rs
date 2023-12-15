@@ -1,5 +1,5 @@
 use crate::{
-    builtins::{self, bool},
+    builtins::{self, bool, g1_element, g2_element},
     expr::{TypedExpr, UntypedExpr},
     parser::token::{Base, Token},
     tipo::{PatternConstructor, Type, TypeInfo},
@@ -11,6 +11,7 @@ use std::{
     ops::Range,
     rc::Rc,
 };
+use uplc::machine::runtime::Compressable;
 use vec1::Vec1;
 
 pub const CAPTURE_VARIABLE: &str = "_capture";
@@ -425,16 +426,36 @@ impl TypedDefinition {
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
         // Note that the fn span covers the function head, not
         // the entire statement.
-        if let Definition::Fn(Function { body, .. })
-        | Definition::Validator(Validator {
-            fun: Function { body, .. },
-            ..
-        })
-        | Definition::Test(Function { body, .. }) = self
-        {
-            if let Some(located) = body.find_node(byte_index) {
-                return Some(located);
+        match self {
+            Definition::Validator(Validator {
+                fun: Function { body, .. },
+                other_fun:
+                    Some(Function {
+                        body: other_body, ..
+                    }),
+                ..
+            }) => {
+                if let Some(located) = body.find_node(byte_index) {
+                    return Some(located);
+                }
+
+                if let Some(located) = other_body.find_node(byte_index) {
+                    return Some(located);
+                }
             }
+
+            Definition::Fn(Function { body, .. })
+            | Definition::Test(Function { body, .. })
+            | Definition::Validator(Validator {
+                fun: Function { body, .. },
+                ..
+            }) => {
+                if let Some(located) = body.find_node(byte_index) {
+                    return Some(located);
+                }
+            }
+
+            _ => (),
         }
 
         if self.location().contains(byte_index) {
@@ -448,7 +469,7 @@ impl TypedDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Located<'a> {
     Expression(&'a TypedExpr),
-    Pattern(&'a TypedPattern, &'a TypedExpr),
+    Pattern(&'a TypedPattern, Rc<Type>),
     Definition(&'a TypedDefinition),
 }
 
@@ -492,6 +513,12 @@ pub enum Constant {
         bytes: Vec<u8>,
         preferred_format: ByteArrayFormatPreference,
     },
+
+    CurvePoint {
+        location: Span,
+        point: Box<Curve>,
+        preferred_format: ByteArrayFormatPreference,
+    },
 }
 
 impl Constant {
@@ -500,6 +527,10 @@ impl Constant {
             Constant::Int { .. } => builtins::int(),
             Constant::String { .. } => builtins::string(),
             Constant::ByteArray { .. } => builtins::byte_array(),
+            Constant::CurvePoint { point, .. } => match point.as_ref() {
+                Curve::Bls12_381(Bls12_381Point::G1(_)) => builtins::g1_element(),
+                Curve::Bls12_381(Bls12_381Point::G2(_)) => builtins::g2_element(),
+            },
         }
     }
 
@@ -507,7 +538,8 @@ impl Constant {
         match self {
             Constant::Int { location, .. }
             | Constant::String { location, .. }
-            | Constant::ByteArray { location, .. } => *location,
+            | Constant::ByteArray { location, .. }
+            | Constant::CurvePoint { location, .. } => *location,
         }
     }
 }
@@ -952,7 +984,7 @@ impl<A, B> Pattern<A, B> {
 }
 
 impl TypedPattern {
-    pub fn find_node<'a>(&'a self, byte_index: usize, value: &'a TypedExpr) -> Option<Located<'a>> {
+    pub fn find_node<'a>(&'a self, byte_index: usize, value: &Rc<Type>) -> Option<Located<'a>> {
         if !self.location().contains(byte_index) {
             return None;
         }
@@ -961,20 +993,41 @@ impl TypedPattern {
             Pattern::Int { .. }
             | Pattern::Var { .. }
             | Pattern::Assign { .. }
-            | Pattern::Discard { .. } => Some(Located::Pattern(self, value)),
+            | Pattern::Discard { .. } => Some(Located::Pattern(self, value.clone())),
 
             Pattern::List { elements, .. }
             | Pattern::Tuple {
                 elems: elements, ..
-            } => elements
-                .iter()
-                .find_map(|e| e.find_node(byte_index, value))
-                .or(Some(Located::Pattern(self, value))),
+            } => match &**value {
+                Type::Tuple { elems } => elements
+                    .iter()
+                    .zip(elems.iter())
+                    .find_map(|(e, t)| e.find_node(byte_index, t))
+                    .or(Some(Located::Pattern(self, value.clone()))),
+                Type::App {
+                    module, name, args, ..
+                } if module.is_empty() && name == "List" => elements
+                    .iter()
+                    // this is the same as above but this uses
+                    // cycle to repeat the single type arg for a list
+                    // there's probably a cleaner way to re-use the code
+                    // from this branch and the above.
+                    .zip(args.iter().cycle())
+                    .find_map(|(e, t)| e.find_node(byte_index, t))
+                    .or(Some(Located::Pattern(self, value.clone()))),
+                _ => None,
+            },
 
-            Pattern::Constructor { arguments, .. } => arguments
-                .iter()
-                .find_map(|e| e.value.find_node(byte_index, value))
-                .or(Some(Located::Pattern(self, value))),
+            Pattern::Constructor {
+                arguments, tipo, ..
+            } => match &**tipo {
+                Type::Fn { args, .. } => arguments
+                    .iter()
+                    .zip(args.iter())
+                    .find_map(|(e, t)| e.value.find_node(byte_index, t))
+                    .or(Some(Located::Pattern(self, value.clone()))),
+                _ => None,
+            },
         }
     }
 
@@ -995,6 +1048,93 @@ pub enum ByteArrayFormatPreference {
     HexadecimalString,
     ArrayOfBytes(Base),
     Utf8String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum CurveType {
+    Bls12_381(Bls12_381PointType),
+}
+
+impl Display for CurveType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CurveType::Bls12_381(point) => write!(f, "<Bls12_381, {point}>"),
+        }
+    }
+}
+impl From<&Curve> for CurveType {
+    fn from(value: &Curve) -> Self {
+        match value {
+            Curve::Bls12_381(point) => CurveType::Bls12_381(point.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum Bls12_381PointType {
+    G1,
+    G2,
+}
+
+impl From<&Bls12_381Point> for Bls12_381PointType {
+    fn from(value: &Bls12_381Point) -> Self {
+        match value {
+            Bls12_381Point::G1(_) => Bls12_381PointType::G1,
+            Bls12_381Point::G2(_) => Bls12_381PointType::G2,
+        }
+    }
+}
+
+impl Display for Bls12_381PointType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Bls12_381PointType::G1 => write!(f, "G1"),
+            Bls12_381PointType::G2 => write!(f, "G2"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum Curve {
+    Bls12_381(Bls12_381Point),
+}
+
+impl Curve {
+    pub fn compress(&self) -> Vec<u8> {
+        match self {
+            Curve::Bls12_381(point) => match point {
+                Bls12_381Point::G1(g1) => g1.compress(),
+                Bls12_381Point::G2(g2) => g2.compress(),
+            },
+        }
+    }
+
+    pub fn tipo(&self) -> Rc<Type> {
+        match self {
+            Curve::Bls12_381(point) => point.tipo(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum Bls12_381Point {
+    G1(blst::blst_p1),
+    G2(blst::blst_p2),
+}
+
+impl Bls12_381Point {
+    pub fn tipo(&self) -> Rc<Type> {
+        match self {
+            Bls12_381Point::G1(_) => g1_element(),
+            Bls12_381Point::G2(_) => g2_element(),
+        }
+    }
+}
+
+impl Default for Bls12_381Point {
+    fn default() -> Self {
+        Bls12_381Point::G1(Default::default())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -1049,8 +1189,10 @@ impl TypedClause {
         }
     }
 
-    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
-        self.then.find_node(byte_index)
+    pub fn find_node(&self, byte_index: usize, subject_type: &Rc<Type>) -> Option<Located<'_>> {
+        self.pattern
+            .find_node(byte_index, subject_type)
+            .or_else(|| self.then.find_node(byte_index))
     }
 }
 

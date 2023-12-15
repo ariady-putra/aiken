@@ -261,6 +261,9 @@ pub enum Constant {
     // Apply(Box<Constant>, Type),
     // tag: 8
     Data(PlutusData),
+    Bls12_381G1Element(Box<blst::blst_p1>),
+    Bls12_381G2Element(Box<blst::blst_p2>),
+    Bls12_381MlResult(Box<blst::blst_fp12>),
 }
 
 pub struct Data {}
@@ -335,6 +338,9 @@ pub enum Type {
     List(Rc<Type>),
     Pair(Rc<Type>, Rc<Type>),
     Data,
+    Bls12_381G1Element,
+    Bls12_381G2Element,
+    Bls12_381MlResult,
 }
 
 impl Display for Type {
@@ -348,6 +354,9 @@ impl Display for Type {
             Type::List(t) => write!(f, "list {t}"),
             Type::Pair(t1, t2) => write!(f, "pair {t1} {t2}"),
             Type::Data => write!(f, "data"),
+            Type::Bls12_381G1Element => write!(f, "bls12_381_G1_element"),
+            Type::Bls12_381G2Element => write!(f, "bls12_381_G2_element"),
+            Type::Bls12_381MlResult => write!(f, "bls12_381_mlresult"),
         }
     }
 }
@@ -718,12 +727,17 @@ impl Program<NamedDeBruijn> {
     }
 
     /// Evaluate a Program as PlutusV1
-    pub fn eval_v1(self) -> EvalResult {
-        let mut machine = Machine::new(Language::PlutusV1, CostModel::v1(), ExBudget::v1(), 200);
+    pub fn eval_version(self, version: &Language) -> EvalResult {
+        let mut machine = Machine::new(
+            version.clone(),
+            CostModel::default(),
+            ExBudget::default(),
+            200,
+        );
 
         let term = machine.run(self.term);
 
-        EvalResult::new(term, machine.ex_budget, ExBudget::v1(), machine.logs)
+        EvalResult::new(term, machine.ex_budget, ExBudget::default(), machine.logs)
     }
 
     pub fn eval_as(
@@ -732,10 +746,7 @@ impl Program<NamedDeBruijn> {
         costs: &[i64],
         initial_budget: Option<&ExBudget>,
     ) -> EvalResult {
-        let budget = match initial_budget {
-            Some(b) => *b,
-            None => ExBudget::default(),
-        };
+        let budget = initial_budget.copied().unwrap_or_default();
 
         let mut machine = Machine::new(
             version.clone(),

@@ -1,17 +1,19 @@
-use crate::{
-    ast::{
-        Constant, DeBruijn, FakeNamedDeBruijn, Name, NamedDeBruijn, Program, Term, Type, Unique,
-    },
-    builtins::DefaultFunction,
-};
-use anyhow::anyhow;
-use flat_rs::{
+use std::{collections::VecDeque, fmt::Debug, rc::Rc};
+
+use pallas_codec::flat::{
     de::{self, Decode, Decoder},
     en::{self, Encode, Encoder},
     Flat,
 };
 use pallas_primitives::{babbage::PlutusData, Fragment};
-use std::{collections::VecDeque, fmt::Debug, rc::Rc};
+
+use crate::{
+    ast::{
+        Constant, DeBruijn, FakeNamedDeBruijn, Name, NamedDeBruijn, Program, Term, Type, Unique,
+    },
+    builtins::DefaultFunction,
+    machine::runtime::Compressable,
+};
 
 const BUILTIN_TAG_WIDTH: u32 = 7;
 const CONST_TAG_WIDTH: u32 = 4;
@@ -114,7 +116,10 @@ where
 
         match term_option {
             Ok(term) => Ok(Program { version, term }),
-            Err(error) => Err(de::Error::ParseError(state_log.join(""), anyhow!(error))),
+            Err(error) => Err(de::Error::Message(format!(
+                "{} {error}",
+                state_log.join("")
+            ))),
         }
     }
 }
@@ -487,6 +492,27 @@ impl Encode for Constant {
 
                 cbor.encode(e)?;
             }
+            Constant::Bls12_381G1Element(b) => {
+                encode_constant(&[9], e)?;
+
+                let x = b.compress();
+
+                x.encode(e)?;
+            }
+            Constant::Bls12_381G2Element(b) => {
+                encode_constant(&[10], e)?;
+
+                let x = b.compress();
+
+                x.encode(e)?;
+            }
+            Constant::Bls12_381MlResult(_) => {
+                encode_constant(&[11], e)?;
+
+                return Err(en::Error::Message(
+                    "BLS12-381 ML results are not supported for flat encoding".to_string(),
+                ));
+            }
         }
 
         Ok(())
@@ -520,16 +546,29 @@ fn encode_constant_value(x: &Constant, e: &mut Encoder) -> Result<(), en::Error>
 
             cbor.encode(e)
         }
+        Constant::Bls12_381G1Element(b) => {
+            let x = b.compress();
+
+            x.encode(e)
+        }
+        Constant::Bls12_381G2Element(b) => {
+            let x = b.compress();
+
+            x.encode(e)
+        }
+        Constant::Bls12_381MlResult(_) => Err(en::Error::Message(
+            "BLS12-381 ML results are not supported for flat encoding".to_string(),
+        )),
     }
 }
 
 fn encode_type(typ: &Type, bytes: &mut Vec<u8>) {
     match typ {
-        Type::Bool => bytes.push(4),
         Type::Integer => bytes.push(0),
-        Type::String => bytes.push(2),
         Type::ByteString => bytes.push(1),
+        Type::String => bytes.push(2),
         Type::Unit => bytes.push(3),
+        Type::Bool => bytes.push(4),
         Type::List(sub_typ) => {
             bytes.extend(vec![7, 5]);
             encode_type(sub_typ, bytes);
@@ -540,6 +579,9 @@ fn encode_type(typ: &Type, bytes: &mut Vec<u8>) {
             encode_type(type2, bytes);
         }
         Type::Data => bytes.push(8),
+        Type::Bls12_381G1Element => bytes.push(9),
+        Type::Bls12_381G2Element => bytes.push(10),
+        Type::Bls12_381MlResult => bytes.push(11),
     }
 }
 
@@ -580,6 +622,28 @@ impl<'b> Decode<'b> for Constant {
 
                 Ok(Constant::Data(data))
             }
+            [9] => {
+                let p1 = Vec::<u8>::decode(d)?;
+
+                let p1 = blst::blst_p1::uncompress(&p1).map_err(|err| {
+                    de::Error::Message(format!("Failed to uncompress p1: {}", err))
+                })?;
+
+                Ok(Constant::Bls12_381G1Element(p1.into()))
+            }
+
+            [10] => {
+                let p2 = Vec::<u8>::decode(d)?;
+
+                let p2 = blst::blst_p2::uncompress(&p2).map_err(|err| {
+                    de::Error::Message(format!("Failed to uncompress p2: {}", err))
+                })?;
+
+                Ok(Constant::Bls12_381G2Element(p2.into()))
+            }
+            [11] => Err(de::Error::Message(
+                "BLS12-381 ML results are not supported for flat decoding".to_string(),
+            )),
             x => Err(de::Error::Message(format!(
                 "Unknown constant constructor tag: {x:?}"
             ))),
@@ -619,6 +683,25 @@ fn decode_constant_value(typ: Rc<Type>, d: &mut Decoder) -> Result<Constant, de:
 
             Ok(Constant::Data(data))
         }
+        Type::Bls12_381G1Element => {
+            let p1 = Vec::<u8>::decode(d)?;
+
+            let p1 = blst::blst_p1::uncompress(&p1)
+                .map_err(|err| de::Error::Message(format!("Failed to uncompress p1: {}", err)))?;
+
+            Ok(Constant::Bls12_381G1Element(p1.into()))
+        }
+        Type::Bls12_381G2Element => {
+            let p2 = Vec::<u8>::decode(d)?;
+
+            let p2 = blst::blst_p2::uncompress(&p2)
+                .map_err(|err| de::Error::Message(format!("Failed to uncompress p2: {}", err)))?;
+
+            Ok(Constant::Bls12_381G2Element(p2.into()))
+        }
+        Type::Bls12_381MlResult => Err(de::Error::Message(
+            "BLS12-381 ML results are not supported for flat decoding".to_string(),
+        )),
     }
 }
 
@@ -630,6 +713,9 @@ fn decode_type(types: &mut VecDeque<u8>) -> Result<Type, de::Error> {
         Some(1) => Ok(Type::ByteString),
         Some(3) => Ok(Type::Unit),
         Some(8) => Ok(Type::Data),
+        Some(9) => Ok(Type::Bls12_381G1Element),
+        Some(10) => Ok(Type::Bls12_381G2Element),
+        Some(11) => Ok(Type::Bls12_381MlResult),
         Some(7) => match types.pop_front() {
             Some(5) => Ok(Type::List(decode_type(types)?.into())),
             Some(7) => match types.pop_front() {
@@ -864,8 +950,8 @@ mod tests {
         ast::{DeBruijn, Name, Type},
         parser,
     };
-    use flat_rs::Flat;
     use indoc::indoc;
+    use pallas_codec::flat::Flat;
 
     #[test]
     fn flat_encode_integer() {

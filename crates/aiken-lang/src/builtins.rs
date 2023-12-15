@@ -19,7 +19,9 @@ pub const INT: &str = "Int";
 pub const DATA: &str = "Data";
 pub const LIST: &str = "List";
 pub const VOID: &str = "Void";
-pub const RESULT: &str = "Result";
+pub const G1_ELEMENT: &str = "G1Element";
+pub const G2_ELEMENT: &str = "G2Element";
+pub const MILLER_LOOP_RESULT: &str = "MillerLoopResult";
 pub const STRING: &str = "String";
 pub const OPTION: &str = "Option";
 pub const ORDERING: &str = "Ordering";
@@ -116,6 +118,42 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
             location: Span::empty(),
             parameters: vec![],
             tipo: bool(),
+            module: "".to_string(),
+            public: true,
+        },
+    );
+
+    // G1Element
+    prelude.types.insert(
+        G1_ELEMENT.to_string(),
+        TypeConstructor {
+            parameters: vec![],
+            tipo: g1_element(),
+            location: Span::empty(),
+            module: "".to_string(),
+            public: true,
+        },
+    );
+
+    // G2Element
+    prelude.types.insert(
+        G2_ELEMENT.to_string(),
+        TypeConstructor {
+            parameters: vec![],
+            tipo: g2_element(),
+            location: Span::empty(),
+            module: "".to_string(),
+            public: true,
+        },
+    );
+
+    // MillerLoopResult
+    prelude.types.insert(
+        MILLER_LOOP_RESULT.to_string(),
+        TypeConstructor {
+            parameters: vec![],
+            tipo: int(),
+            location: Span::empty(),
             module: "".to_string(),
             public: true,
         },
@@ -388,19 +426,16 @@ pub fn plutus(id_gen: &IdGenerator) -> TypeInfo {
     };
 
     for builtin in DefaultFunction::iter() {
-        if let Some(value) = from_default_function(builtin, id_gen) {
-            plutus.values.insert(builtin.aiken_name(), value);
-        }
+        let value = from_default_function(builtin, id_gen);
+
+        plutus.values.insert(builtin.aiken_name(), value);
     }
 
     plutus
 }
 
-pub fn from_default_function(
-    builtin: DefaultFunction,
-    id_gen: &IdGenerator,
-) -> Option<ValueConstructor> {
-    let info = match builtin {
+pub fn from_default_function(builtin: DefaultFunction, id_gen: &IdGenerator) -> ValueConstructor {
+    let (tipo, arity) = match builtin {
         DefaultFunction::AddInteger
         | DefaultFunction::SubtractInteger
         | DefaultFunction::MultiplyInteger
@@ -410,7 +445,7 @@ pub fn from_default_function(
         | DefaultFunction::ModInteger => {
             let tipo = function(vec![int(), int()], int());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
 
         DefaultFunction::EqualsInteger
@@ -418,170 +453,174 @@ pub fn from_default_function(
         | DefaultFunction::LessThanEqualsInteger => {
             let tipo = function(vec![int(), int()], bool());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::AppendByteString => {
             let tipo = function(vec![byte_array(), byte_array()], byte_array());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::ConsByteString => {
             let tipo = function(vec![int(), byte_array()], byte_array());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::SliceByteString => {
             let tipo = function(vec![int(), int(), byte_array()], byte_array());
 
-            Some((tipo, 3))
+            (tipo, 3)
         }
         DefaultFunction::LengthOfByteString => {
             let tipo = function(vec![byte_array()], int());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::IndexByteString => {
             let tipo = function(vec![byte_array(), int()], int());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::EqualsByteString
         | DefaultFunction::LessThanByteString
         | DefaultFunction::LessThanEqualsByteString => {
             let tipo = function(vec![byte_array(), byte_array()], bool());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
-        DefaultFunction::Sha2_256 | DefaultFunction::Sha3_256 | DefaultFunction::Blake2b_256 => {
+        DefaultFunction::Sha2_256
+        | DefaultFunction::Sha3_256
+        | DefaultFunction::Blake2b_224
+        | DefaultFunction::Blake2b_256
+        | DefaultFunction::Keccak_256 => {
             let tipo = function(vec![byte_array()], byte_array());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
 
         DefaultFunction::VerifyEd25519Signature => {
             let tipo = function(vec![byte_array(), byte_array(), byte_array()], bool());
 
-            Some((tipo, 3))
+            (tipo, 3)
         }
 
         DefaultFunction::VerifyEcdsaSecp256k1Signature => {
             let tipo = function(vec![byte_array(), byte_array(), byte_array()], bool());
 
-            Some((tipo, 3))
+            (tipo, 3)
         }
         DefaultFunction::VerifySchnorrSecp256k1Signature => {
             let tipo = function(vec![byte_array(), byte_array(), byte_array()], bool());
 
-            Some((tipo, 3))
+            (tipo, 3)
         }
 
         DefaultFunction::AppendString => {
             let tipo = function(vec![string(), string()], string());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::EqualsString => {
             let tipo = function(vec![string(), string()], bool());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::EncodeUtf8 => {
             let tipo = function(vec![string()], byte_array());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::DecodeUtf8 => {
             let tipo = function(vec![byte_array()], string());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::IfThenElse => {
             let ret = generic_var(id_gen.next());
 
             let tipo = function(vec![bool(), ret.clone(), ret.clone()], ret);
 
-            Some((tipo, 3))
+            (tipo, 3)
         }
         DefaultFunction::HeadList => {
             let ret = generic_var(id_gen.next());
 
             let tipo = function(vec![list(ret.clone())], ret);
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::TailList => {
             let ret = list(generic_var(id_gen.next()));
 
             let tipo = function(vec![ret.clone()], ret);
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::NullList => {
             let ret = list(generic_var(id_gen.next()));
 
             let tipo = function(vec![ret], bool());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::ConstrData => {
             let tipo = function(vec![int(), list(data())], data());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::MapData => {
             let tipo = function(vec![list(tuple(vec![data(), data()]))], data());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::ListData => {
             let tipo = function(vec![list(data())], data());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::IData => {
             let tipo = function(vec![int()], data());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::BData => {
             let tipo = function(vec![byte_array()], data());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::UnConstrData => {
             let tipo = function(vec![data()], tuple(vec![int(), list(data())]));
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::UnMapData => {
             let tipo = function(vec![data()], list(tuple(vec![data(), data()])));
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::UnListData => {
             let tipo = function(vec![data()], list(data()));
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::UnIData => {
             let tipo = function(vec![data()], int());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::UnBData => {
             let tipo = function(vec![data()], byte_array());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::EqualsData => {
             let tipo = function(vec![data(), data()], bool());
 
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::SerialiseData => {
             let tipo = function(vec![data()], byte_array());
 
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::ChooseData => {
             let a = generic_var(id_gen.next());
@@ -596,68 +635,155 @@ pub fn from_default_function(
                 ],
                 a,
             );
-            Some((tipo, 6))
+            (tipo, 6)
         }
         DefaultFunction::MkPairData => {
             let tipo = function(vec![data(), data()], tuple(vec![data(), data()]));
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::MkNilData => {
             let tipo = function(vec![], list(data()));
-            Some((tipo, 0))
+            (tipo, 0)
         }
         DefaultFunction::MkNilPairData => {
             let tipo = function(vec![], list(tuple(vec![data(), data()])));
-            Some((tipo, 0))
+            (tipo, 0)
         }
         DefaultFunction::ChooseUnit => {
             let a = generic_var(id_gen.next());
             let tipo = function(vec![data(), a.clone()], a);
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::Trace => {
             let a = generic_var(id_gen.next());
             let tipo = function(vec![string(), a.clone()], a);
-            Some((tipo, 2))
+            (tipo, 2)
         }
         DefaultFunction::FstPair => {
             let a = generic_var(id_gen.next());
             let b = generic_var(id_gen.next());
             let tipo = function(vec![tuple(vec![a.clone(), b])], a);
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::SndPair => {
             let a = generic_var(id_gen.next());
             let b = generic_var(id_gen.next());
             let tipo = function(vec![tuple(vec![a, b.clone()])], b);
-            Some((tipo, 1))
+            (tipo, 1)
         }
         DefaultFunction::ChooseList => {
             let a = generic_var(id_gen.next());
             let b = generic_var(id_gen.next());
             let tipo = function(vec![list(a), b.clone(), b.clone()], b);
-            Some((tipo, 3))
+            (tipo, 3)
         }
         DefaultFunction::MkCons => {
             let a = generic_var(id_gen.next());
             let tipo = function(vec![a.clone(), list(a.clone())], list(a));
-            Some((tipo, 2))
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G1_Add => {
+            let tipo = function(vec![g1_element(), g1_element()], g1_element());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G1_Equal => {
+            let tipo = function(vec![g1_element(), g1_element()], bool());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G1_Neg => {
+            let tipo = function(vec![g1_element()], g1_element());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Bls12_381_G1_ScalarMul => {
+            let tipo = function(vec![int(), g1_element()], g1_element());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G1_Compress => {
+            let tipo = function(vec![g1_element()], byte_array());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Bls12_381_G1_Uncompress => {
+            let tipo = function(vec![byte_array()], g1_element());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Bls12_381_G1_HashToGroup => {
+            let tipo = function(vec![byte_array(), byte_array()], g1_element());
+
+            (tipo, 2)
+        }
+
+        DefaultFunction::Bls12_381_G2_Add => {
+            let tipo = function(vec![g2_element(), g2_element()], g2_element());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G2_Equal => {
+            let tipo = function(vec![g2_element(), g2_element()], bool());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G2_Neg => {
+            let tipo = function(vec![g2_element()], g2_element());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Bls12_381_G2_ScalarMul => {
+            let tipo = function(vec![int(), g2_element()], g2_element());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_G2_Compress => {
+            let tipo = function(vec![g2_element()], byte_array());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Bls12_381_G2_Uncompress => {
+            let tipo = function(vec![byte_array()], g2_element());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Bls12_381_G2_HashToGroup => {
+            let tipo = function(vec![byte_array(), byte_array()], g2_element());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_MillerLoop => {
+            let tipo = function(vec![g1_element(), g2_element()], miller_loop_result());
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_MulMlResult => {
+            let tipo = function(
+                vec![miller_loop_result(), miller_loop_result()],
+                miller_loop_result(),
+            );
+
+            (tipo, 2)
+        }
+        DefaultFunction::Bls12_381_FinalVerify => {
+            let tipo = function(vec![miller_loop_result(), miller_loop_result()], bool());
+
+            (tipo, 2)
         }
     };
 
-    info.map(|(tipo, arity)| {
-        ValueConstructor::public(
-            tipo,
-            ValueConstructorVariant::ModuleFn {
-                name: builtin.aiken_name(),
-                field_map: None,
-                module: "".to_string(),
-                arity,
-                location: Span::empty(),
-                builtin: Some(builtin),
-            },
-        )
-    })
+    ValueConstructor::public(
+        tipo,
+        ValueConstructorVariant::ModuleFn {
+            name: builtin.aiken_name(),
+            field_map: None,
+            module: "".to_string(),
+            arity,
+            location: Span::empty(),
+            builtin: Some(builtin),
+        },
+    )
 }
 
 pub fn prelude_functions(id_gen: &IdGenerator) -> IndexMap<FunctionAccessKey, TypedFunction> {
@@ -1035,6 +1161,33 @@ pub fn byte_array() -> Rc<Type> {
     })
 }
 
+pub fn g1_element() -> Rc<Type> {
+    Rc::new(Type::App {
+        public: true,
+        module: "".to_string(),
+        name: G1_ELEMENT.to_string(),
+        args: vec![],
+    })
+}
+
+pub fn g2_element() -> Rc<Type> {
+    Rc::new(Type::App {
+        public: true,
+        module: "".to_string(),
+        name: G2_ELEMENT.to_string(),
+        args: vec![],
+    })
+}
+
+pub fn miller_loop_result() -> Rc<Type> {
+    Rc::new(Type::App {
+        public: true,
+        module: "".to_string(),
+        name: MILLER_LOOP_RESULT.to_string(),
+        args: vec![],
+    })
+}
+
 pub fn tuple(elems: Vec<Rc<Type>>) -> Rc<Type> {
     Rc::new(Type::Tuple { elems })
 }
@@ -1072,15 +1225,6 @@ pub fn void() -> Rc<Type> {
         public: true,
         name: VOID.to_string(),
         module: "".to_string(),
-    })
-}
-
-pub fn result(a: Rc<Type>, e: Rc<Type>) -> Rc<Type> {
-    Rc::new(Type::App {
-        public: true,
-        name: RESULT.to_string(),
-        module: "".to_string(),
-        args: vec![a, e],
     })
 }
 

@@ -1,7 +1,9 @@
-use std::{ops::Deref, rc::Rc};
+use std::{mem::size_of, ops::Deref, rc::Rc};
 
+use num_bigint::BigInt;
 use num_integer::Integer;
-use pallas_primitives::babbage::{Constr, PlutusData};
+use once_cell::sync::Lazy;
+use pallas_primitives::babbage::{Constr, Language, PlutusData};
 
 use crate::{
     ast::{Constant, Type},
@@ -15,11 +17,40 @@ use super::{
     Error, Value,
 };
 
+static SCALAR_PERIOD: Lazy<BigInt> = Lazy::new(|| {
+    BigInt::from_bytes_be(
+        num_bigint::Sign::Plus,
+        &[
+            0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1,
+            0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff,
+            0x00, 0x00, 0x00, 0x01,
+        ],
+    )
+});
+
+const BLST_P1_COMPRESSED_SIZE: usize = 48;
+
+const BLST_P2_COMPRESSED_SIZE: usize = 96;
+
 //#[derive(std::cmp::PartialEq)]
 //pub enum EvalMode {
 //    Immediate,
 //    Deferred,
 //}
+
+pub enum BuiltinSemantics {
+    V1,
+    V2,
+}
+
+impl From<&Language> for BuiltinSemantics {
+    fn from(language: &Language) -> Self {
+        match language {
+            Language::PlutusV1 => BuiltinSemantics::V1,
+            Language::PlutusV2 => BuiltinSemantics::V1,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct BuiltinRuntime {
@@ -53,24 +84,18 @@ impl BuiltinRuntime {
         self.forces += 1;
     }
 
-    pub fn call(&self, logs: &mut Vec<String>) -> Result<Value, Error> {
-        self.fun.call(&self.args, logs)
+    pub fn call(&self, language: &Language, logs: &mut Vec<String>) -> Result<Value, Error> {
+        self.fun.call(language.into(), &self.args, logs)
     }
 
     pub fn push(&mut self, arg: Value) -> Result<(), Error> {
-        self.fun.check_type(&arg, &self.args)?;
-
         self.args.push(arg);
 
         Ok(())
     }
 
-    pub fn to_ex_budget_v2(&self, costs: &BuiltinCosts) -> ExBudget {
-        costs.to_ex_budget_v2(self.fun, &self.args)
-    }
-
-    pub fn to_ex_budget_v1(&self, costs: &BuiltinCosts) -> ExBudget {
-        costs.to_ex_budget_v1(self.fun, &self.args)
+    pub fn to_ex_budget(&self, costs: &BuiltinCosts) -> ExBudget {
+        costs.to_ex_budget(self.fun, &self.args)
     }
 }
 
@@ -103,7 +128,9 @@ impl DefaultFunction {
             DefaultFunction::LessThanEqualsByteString => 2,
             DefaultFunction::Sha2_256 => 1,
             DefaultFunction::Sha3_256 => 1,
+            DefaultFunction::Blake2b_224 => 1,
             DefaultFunction::Blake2b_256 => 1,
+            DefaultFunction::Keccak_256 => 1,
             DefaultFunction::VerifyEd25519Signature => 3,
             DefaultFunction::VerifyEcdsaSecp256k1Signature => 3,
             DefaultFunction::VerifySchnorrSecp256k1Signature => 3,
@@ -137,6 +164,23 @@ impl DefaultFunction {
             DefaultFunction::MkPairData => 2,
             DefaultFunction::MkNilData => 1,
             DefaultFunction::MkNilPairData => 1,
+            DefaultFunction::Bls12_381_G1_Add => 2,
+            DefaultFunction::Bls12_381_G1_Neg => 1,
+            DefaultFunction::Bls12_381_G1_ScalarMul => 2,
+            DefaultFunction::Bls12_381_G1_Equal => 2,
+            DefaultFunction::Bls12_381_G1_Compress => 1,
+            DefaultFunction::Bls12_381_G1_Uncompress => 1,
+            DefaultFunction::Bls12_381_G1_HashToGroup => 2,
+            DefaultFunction::Bls12_381_G2_Add => 2,
+            DefaultFunction::Bls12_381_G2_Neg => 1,
+            DefaultFunction::Bls12_381_G2_ScalarMul => 2,
+            DefaultFunction::Bls12_381_G2_Equal => 2,
+            DefaultFunction::Bls12_381_G2_Compress => 1,
+            DefaultFunction::Bls12_381_G2_Uncompress => 1,
+            DefaultFunction::Bls12_381_G2_HashToGroup => 2,
+            DefaultFunction::Bls12_381_MillerLoop => 2,
+            DefaultFunction::Bls12_381_MulMlResult => 2,
+            DefaultFunction::Bls12_381_FinalVerify => 2,
         }
     }
 
@@ -162,7 +206,9 @@ impl DefaultFunction {
             DefaultFunction::LessThanEqualsByteString => 0,
             DefaultFunction::Sha2_256 => 0,
             DefaultFunction::Sha3_256 => 0,
+            DefaultFunction::Blake2b_224 => 0,
             DefaultFunction::Blake2b_256 => 0,
+            DefaultFunction::Keccak_256 => 0,
             DefaultFunction::VerifyEd25519Signature => 0,
             DefaultFunction::VerifyEcdsaSecp256k1Signature => 0,
             DefaultFunction::VerifySchnorrSecp256k1Signature => 0,
@@ -196,141 +242,36 @@ impl DefaultFunction {
             DefaultFunction::MkPairData => 0,
             DefaultFunction::MkNilData => 0,
             DefaultFunction::MkNilPairData => 0,
+            DefaultFunction::Bls12_381_G1_Add => 0,
+            DefaultFunction::Bls12_381_G1_Neg => 0,
+            DefaultFunction::Bls12_381_G1_ScalarMul => 0,
+            DefaultFunction::Bls12_381_G1_Equal => 0,
+            DefaultFunction::Bls12_381_G1_Compress => 0,
+            DefaultFunction::Bls12_381_G1_Uncompress => 0,
+            DefaultFunction::Bls12_381_G1_HashToGroup => 0,
+            DefaultFunction::Bls12_381_G2_Add => 0,
+            DefaultFunction::Bls12_381_G2_Neg => 0,
+            DefaultFunction::Bls12_381_G2_ScalarMul => 0,
+            DefaultFunction::Bls12_381_G2_Equal => 0,
+            DefaultFunction::Bls12_381_G2_Compress => 0,
+            DefaultFunction::Bls12_381_G2_Uncompress => 0,
+            DefaultFunction::Bls12_381_G2_HashToGroup => 0,
+            DefaultFunction::Bls12_381_MillerLoop => 0,
+            DefaultFunction::Bls12_381_MulMlResult => 0,
+            DefaultFunction::Bls12_381_FinalVerify => 0,
         }
     }
 
-    pub fn check_type(&self, arg: &Value, args: &[Value]) -> Result<(), Error> {
-        match self {
-            DefaultFunction::AddInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::SubtractInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::MultiplyInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::DivideInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::QuotientInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::RemainderInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::ModInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::EqualsInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::LessThanInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::LessThanEqualsInteger => arg.expect_type(Type::Integer),
-            DefaultFunction::AppendByteString => arg.expect_type(Type::ByteString),
-            DefaultFunction::ConsByteString => {
-                if args.is_empty() {
-                    arg.expect_type(Type::Integer)
-                } else {
-                    arg.expect_type(Type::ByteString)
-                }
-            }
-            DefaultFunction::SliceByteString => {
-                if args.len() < 2 {
-                    arg.expect_type(Type::Integer)
-                } else {
-                    arg.expect_type(Type::ByteString)
-                }
-            }
-            DefaultFunction::LengthOfByteString => arg.expect_type(Type::ByteString),
-            DefaultFunction::IndexByteString => {
-                if args.is_empty() {
-                    arg.expect_type(Type::ByteString)
-                } else {
-                    arg.expect_type(Type::Integer)
-                }
-            }
-            DefaultFunction::EqualsByteString => arg.expect_type(Type::ByteString),
-            DefaultFunction::LessThanByteString => arg.expect_type(Type::ByteString),
-            DefaultFunction::LessThanEqualsByteString => arg.expect_type(Type::ByteString),
-            DefaultFunction::Sha2_256 => arg.expect_type(Type::ByteString),
-            DefaultFunction::Sha3_256 => arg.expect_type(Type::ByteString),
-            DefaultFunction::Blake2b_256 => arg.expect_type(Type::ByteString),
-            DefaultFunction::VerifyEd25519Signature => arg.expect_type(Type::ByteString),
-            DefaultFunction::VerifyEcdsaSecp256k1Signature => arg.expect_type(Type::ByteString),
-            DefaultFunction::VerifySchnorrSecp256k1Signature => arg.expect_type(Type::ByteString),
-            DefaultFunction::AppendString => arg.expect_type(Type::String),
-            DefaultFunction::EqualsString => arg.expect_type(Type::String),
-            DefaultFunction::EncodeUtf8 => arg.expect_type(Type::String),
-            DefaultFunction::DecodeUtf8 => arg.expect_type(Type::ByteString),
-            DefaultFunction::IfThenElse => {
-                if args.is_empty() {
-                    arg.expect_type(Type::Bool)
-                } else {
-                    Ok(())
-                }
-            }
-            DefaultFunction::ChooseUnit => {
-                if args.is_empty() {
-                    arg.expect_type(Type::Unit)
-                } else {
-                    Ok(())
-                }
-            }
-            DefaultFunction::Trace => {
-                if args.is_empty() {
-                    arg.expect_type(Type::String)
-                } else {
-                    Ok(())
-                }
-            }
-            DefaultFunction::FstPair => arg.expect_pair(),
-            DefaultFunction::SndPair => arg.expect_pair(),
-            DefaultFunction::ChooseList => {
-                if args.is_empty() {
-                    arg.expect_list()
-                } else {
-                    Ok(())
-                }
-            }
-            DefaultFunction::MkCons => {
-                if args.is_empty() {
-                    Ok(())
-                } else {
-                    let first = &args[0];
-
-                    arg.expect_type(Type::List(Rc::new(first.try_into()?)))
-                }
-            }
-            DefaultFunction::HeadList => arg.expect_list(),
-            DefaultFunction::TailList => arg.expect_list(),
-            DefaultFunction::NullList => arg.expect_list(),
-            DefaultFunction::ChooseData => {
-                if args.is_empty() {
-                    arg.expect_type(Type::Data)
-                } else {
-                    Ok(())
-                }
-            }
-            DefaultFunction::ConstrData => {
-                if args.is_empty() {
-                    arg.expect_type(Type::Integer)
-                } else {
-                    arg.expect_type(Type::List(Rc::new(Type::Data)))
-                }
-            }
-            DefaultFunction::MapData => arg.expect_type(Type::List(Rc::new(Type::Pair(
-                Rc::new(Type::Data),
-                Rc::new(Type::Data),
-            )))),
-            DefaultFunction::ListData => arg.expect_type(Type::List(Rc::new(Type::Data))),
-            DefaultFunction::IData => arg.expect_type(Type::Integer),
-            DefaultFunction::BData => arg.expect_type(Type::ByteString),
-            DefaultFunction::UnConstrData => arg.expect_type(Type::Data),
-            DefaultFunction::UnMapData => arg.expect_type(Type::Data),
-            DefaultFunction::UnListData => arg.expect_type(Type::Data),
-            DefaultFunction::UnIData => arg.expect_type(Type::Data),
-            DefaultFunction::UnBData => arg.expect_type(Type::Data),
-            DefaultFunction::EqualsData => arg.expect_type(Type::Data),
-            DefaultFunction::SerialiseData => arg.expect_type(Type::Data),
-            DefaultFunction::MkPairData => arg.expect_type(Type::Data),
-            DefaultFunction::MkNilData => arg.expect_type(Type::Unit),
-            DefaultFunction::MkNilPairData => arg.expect_type(Type::Unit),
-        }
-    }
-
-    // This should be safe because we've already checked
-    // the types of the args as they were pushed. Although
-    // the unreachables look ugly, it's the reality of the situation.
-    pub fn call(&self, args: &[Value], logs: &mut Vec<String>) -> Result<Value, Error> {
+    pub fn call(
+        &self,
+        semantics: BuiltinSemantics,
+        args: &[Value],
+        logs: &mut Vec<String>,
+    ) -> Result<Value, Error> {
         match self {
             DefaultFunction::AddInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let result = arg1 + arg2;
 
@@ -339,8 +280,8 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::SubtractInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let result = arg1 - arg2;
 
@@ -349,8 +290,8 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::MultiplyInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let result = arg1 * arg2;
 
@@ -359,8 +300,8 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::DivideInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 if *arg2 != 0.into() {
                     let (result, _) = arg1.div_mod_floor(arg2);
@@ -373,8 +314,8 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::QuotientInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 if *arg2 != 0.into() {
                     let (result, _) = arg1.div_rem(arg2);
@@ -387,8 +328,8 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::RemainderInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 if *arg2 != 0.into() {
                     let (_, result) = arg1.div_rem(arg2);
@@ -401,8 +342,8 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::ModInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 if *arg2 != 0.into() {
                     let (_, result) = arg1.div_mod_floor(arg2);
@@ -415,32 +356,32 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::EqualsInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let value = Value::bool(arg1 == arg2);
 
                 Ok(value)
             }
             DefaultFunction::LessThanInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let value = Value::bool(arg1 < arg2);
 
                 Ok(value)
             }
             DefaultFunction::LessThanEqualsInteger => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let value = Value::bool(arg1 <= arg2);
 
                 Ok(value)
             }
             DefaultFunction::AppendByteString => {
-                let arg1 = args[0].unwrap_byte_string();
-                let arg2 = args[1].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_byte_string()?;
 
                 let result = arg1.iter().copied().chain(arg2.iter().copied()).collect();
 
@@ -449,12 +390,23 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::ConsByteString => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_byte_string();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_byte_string()?;
 
-                let wrap = arg1.mod_floor(&256.into());
+                let byte: u8 = match semantics {
+                    BuiltinSemantics::V1 => {
+                        let wrap = arg1.mod_floor(&256.into());
 
-                let byte: u8 = wrap.try_into().unwrap();
+                        wrap.try_into().unwrap()
+                    }
+                    BuiltinSemantics::V2 => {
+                        if *arg1 > 255.into() {
+                            return Err(Error::ByteStringConsBiggerThanOneByte(arg1.clone()));
+                        }
+
+                        arg1.try_into().unwrap()
+                    }
+                };
 
                 let mut ret = vec![byte];
 
@@ -465,9 +417,9 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::SliceByteString => {
-                let arg1 = args[0].unwrap_integer();
-                let arg2 = args[1].unwrap_integer();
-                let arg3 = args[2].unwrap_byte_string();
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_integer()?;
+                let arg3 = args[2].unwrap_byte_string()?;
 
                 let skip: usize = if arg1.lt(&0.into()) {
                     0
@@ -487,15 +439,15 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::LengthOfByteString => {
-                let arg1 = args[0].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
 
                 let value = Value::integer(arg1.len().into());
 
                 Ok(value)
             }
             DefaultFunction::IndexByteString => {
-                let arg1 = args[0].unwrap_byte_string();
-                let arg2 = args[1].unwrap_integer();
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_integer()?;
 
                 let index: i128 = arg2.try_into().unwrap();
 
@@ -510,24 +462,24 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::EqualsByteString => {
-                let arg1 = args[0].unwrap_byte_string();
-                let arg2 = args[1].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_byte_string()?;
 
                 let value = Value::bool(arg1 == arg2);
 
                 Ok(value)
             }
             DefaultFunction::LessThanByteString => {
-                let arg1 = args[0].unwrap_byte_string();
-                let arg2 = args[1].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_byte_string()?;
 
                 let value = Value::bool(arg1 < arg2);
 
                 Ok(value)
             }
             DefaultFunction::LessThanEqualsByteString => {
-                let arg1 = args[0].unwrap_byte_string();
-                let arg2 = args[1].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_byte_string()?;
 
                 let value = Value::bool(arg1 <= arg2);
 
@@ -536,7 +488,7 @@ impl DefaultFunction {
             DefaultFunction::Sha2_256 => {
                 use cryptoxide::{digest::Digest, sha2::Sha256};
 
-                let arg1 = args[0].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
 
                 let mut hasher = Sha256::new();
 
@@ -553,7 +505,7 @@ impl DefaultFunction {
             DefaultFunction::Sha3_256 => {
                 use cryptoxide::{digest::Digest, sha3::Sha3_256};
 
-                let arg1 = args[0].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
 
                 let mut hasher = Sha3_256::new();
 
@@ -567,10 +519,26 @@ impl DefaultFunction {
 
                 Ok(value)
             }
+
+            DefaultFunction::Blake2b_224 => {
+                use cryptoxide::{blake2b::Blake2b, digest::Digest};
+
+                let arg1 = args[0].unwrap_byte_string()?;
+
+                let mut digest = [0u8; 28];
+                let mut context = Blake2b::new(28);
+
+                context.input(arg1);
+                context.result(&mut digest);
+
+                let value = Value::byte_string(digest.to_vec());
+
+                Ok(value)
+            }
             DefaultFunction::Blake2b_256 => {
                 use cryptoxide::{blake2b::Blake2b, digest::Digest};
 
-                let arg1 = args[0].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
 
                 let mut digest = [0u8; 32];
                 let mut context = Blake2b::new(32);
@@ -582,12 +550,29 @@ impl DefaultFunction {
 
                 Ok(value)
             }
+            DefaultFunction::Keccak_256 => {
+                use cryptoxide::{digest::Digest, sha3::Keccak256};
+
+                let arg1 = args[0].unwrap_byte_string()?;
+
+                let mut hasher = Keccak256::new();
+
+                hasher.input(arg1);
+
+                let mut bytes = vec![0; hasher.output_bytes()];
+
+                hasher.result(&mut bytes);
+
+                let value = Value::byte_string(bytes);
+
+                Ok(value)
+            }
             DefaultFunction::VerifyEd25519Signature => {
                 use cryptoxide::ed25519;
 
-                let public_key = args[0].unwrap_byte_string();
-                let message = args[1].unwrap_byte_string();
-                let signature = args[2].unwrap_byte_string();
+                let public_key = args[0].unwrap_byte_string()?;
+                let message = args[1].unwrap_byte_string()?;
+                let signature = args[2].unwrap_byte_string()?;
 
                 let public_key: [u8; 32] = public_key
                     .clone()
@@ -606,37 +591,37 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::VerifyEcdsaSecp256k1Signature => {
-                let public_key = args[0].unwrap_byte_string();
-                let message = args[1].unwrap_byte_string();
-                let signature = args[2].unwrap_byte_string();
+                let public_key = args[0].unwrap_byte_string()?;
+                let message = args[1].unwrap_byte_string()?;
+                let signature = args[2].unwrap_byte_string()?;
 
                 verify_ecdsa(public_key, message, signature)
             }
             DefaultFunction::VerifySchnorrSecp256k1Signature => {
-                let public_key = args[0].unwrap_byte_string();
-                let message = args[1].unwrap_byte_string();
-                let signature = args[2].unwrap_byte_string();
+                let public_key = args[0].unwrap_byte_string()?;
+                let message = args[1].unwrap_byte_string()?;
+                let signature = args[2].unwrap_byte_string()?;
 
                 verify_schnorr(public_key, message, signature)
             }
             DefaultFunction::AppendString => {
-                let arg1 = args[0].unwrap_string();
-                let arg2 = args[1].unwrap_string();
+                let arg1 = args[0].unwrap_string()?;
+                let arg2 = args[1].unwrap_string()?;
 
                 let value = Value::string(format!("{arg1}{arg2}"));
 
                 Ok(value)
             }
             DefaultFunction::EqualsString => {
-                let arg1 = args[0].unwrap_string();
-                let arg2 = args[1].unwrap_string();
+                let arg1 = args[0].unwrap_string()?;
+                let arg2 = args[1].unwrap_string()?;
 
                 let value = Value::bool(arg1 == arg2);
 
                 Ok(value)
             }
             DefaultFunction::EncodeUtf8 => {
-                let arg1 = args[0].unwrap_string();
+                let arg1 = args[0].unwrap_string()?;
 
                 let bytes = arg1.as_bytes().to_vec();
 
@@ -645,7 +630,7 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::DecodeUtf8 => {
-                let arg1 = args[0].unwrap_byte_string();
+                let arg1 = args[0].unwrap_byte_string()?;
 
                 let string = String::from_utf8(arg1.clone())?;
 
@@ -654,7 +639,7 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::IfThenElse => {
-                let condition = args[0].unwrap_bool();
+                let condition = args[0].unwrap_bool()?;
 
                 if *condition {
                     Ok(args[1].clone())
@@ -663,35 +648,33 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::ChooseUnit => {
-                // We don't need to check it here because this is already done in
-                // expect_type
-                // let Value::Con(Constant::Unit) = args[0] else {unreachable!()};
+                args[0].unwrap_unit()?;
 
                 Ok(args[1].clone())
             }
             DefaultFunction::Trace => {
-                let arg1 = args[0].unwrap_string();
+                let arg1 = args[0].unwrap_string()?;
 
                 logs.push(arg1.clone());
 
                 Ok(args[1].clone())
             }
             DefaultFunction::FstPair => {
-                let (_, _, first, _) = args[0].unwrap_pair();
+                let (_, _, first, _) = args[0].unwrap_pair()?;
 
                 let value = Value::Con(first.clone());
 
                 Ok(value)
             }
             DefaultFunction::SndPair => {
-                let (_, _, _, second) = args[0].unwrap_pair();
+                let (_, _, _, second) = args[0].unwrap_pair()?;
 
                 let value = Value::Con(second.clone());
 
                 Ok(value)
             }
             DefaultFunction::ChooseList => {
-                let (_, list) = args[0].unwrap_list();
+                let (_, list) = args[0].unwrap_list()?;
 
                 if list.is_empty() {
                     Ok(args[1].clone())
@@ -700,8 +683,12 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::MkCons => {
-                let item = args[0].unwrap_constant();
-                let (r#type, list) = args[1].unwrap_list();
+                let item = args[0].unwrap_constant()?;
+                let (r#type, list) = args[1].unwrap_list()?;
+
+                if *r#type != Type::from(item) {
+                    return Err(Error::TypeMismatch(Type::from(item), r#type.clone()));
+                }
 
                 let mut ret = vec![item.clone()];
 
@@ -712,15 +699,10 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::HeadList => {
-                let c @ Value::Con(inner) = &args[0] else {
-                    unreachable!()
-                };
-                let Constant::ProtoList(_, list) = inner.as_ref() else {
-                    unreachable!()
-                };
+                let (_, list) = args[0].unwrap_list()?;
 
                 if list.is_empty() {
-                    Err(Error::EmptyList(c.clone()))
+                    Err(Error::EmptyList(args[0].clone()))
                 } else {
                     let value = Value::Con(list[0].clone().into());
 
@@ -728,15 +710,10 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::TailList => {
-                let c @ Value::Con(inner) = &args[0] else {
-                    unreachable!()
-                };
-                let Constant::ProtoList(r#type, list) = inner.as_ref() else {
-                    unreachable!()
-                };
+                let (r#type, list) = args[0].unwrap_list()?;
 
                 if list.is_empty() {
-                    Err(Error::EmptyList(c.clone()))
+                    Err(Error::EmptyList(args[0].clone()))
                 } else {
                     let value = Value::list(r#type.clone(), list[1..].to_vec());
 
@@ -744,27 +721,26 @@ impl DefaultFunction {
                 }
             }
             DefaultFunction::NullList => {
-                let (_, list) = args[0].unwrap_list();
+                let (_, list) = args[0].unwrap_list()?;
 
                 let value = Value::bool(list.is_empty());
 
                 Ok(value)
             }
             DefaultFunction::ChooseData => {
-                let con = args[0].unwrap_constant();
+                let con = args[0].unwrap_data()?;
 
                 match con {
-                    Constant::Data(PlutusData::Constr(_)) => Ok(args[1].clone()),
-                    Constant::Data(PlutusData::Map(_)) => Ok(args[2].clone()),
-                    Constant::Data(PlutusData::Array(_)) => Ok(args[3].clone()),
-                    Constant::Data(PlutusData::BigInt(_)) => Ok(args[4].clone()),
-                    Constant::Data(PlutusData::BoundedBytes(_)) => Ok(args[5].clone()),
-                    _ => unreachable!(),
+                    PlutusData::Constr(_) => Ok(args[1].clone()),
+                    PlutusData::Map(_) => Ok(args[2].clone()),
+                    PlutusData::Array(_) => Ok(args[3].clone()),
+                    PlutusData::BigInt(_) => Ok(args[4].clone()),
+                    PlutusData::BoundedBytes(_) => Ok(args[5].clone()),
                 }
             }
             DefaultFunction::ConstrData => {
-                let i = args[0].unwrap_integer();
-                let l = args[1].unwrap_data_list();
+                let i = args[0].unwrap_integer()?;
+                let l = args[1].unwrap_data_list()?;
 
                 let data_list: Vec<PlutusData> = l
                     .iter()
@@ -787,7 +763,17 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::MapData => {
-                let (_, list) = args[0].unwrap_list();
+                let (r#type, list) = args[0].unwrap_list()?;
+
+                if *r#type != Type::Pair(Rc::new(Type::Data), Rc::new(Type::Data)) {
+                    return Err(Error::TypeMismatch(
+                        Type::List(Rc::new(Type::Pair(
+                            Rc::new(Type::Data),
+                            Rc::new(Type::Data),
+                        ))),
+                        r#type.clone(),
+                    ));
+                }
 
                 let mut map = Vec::new();
 
@@ -796,12 +782,13 @@ impl DefaultFunction {
                         unreachable!()
                     };
 
-                    match (left.as_ref(), right.as_ref()) {
-                        (Constant::Data(key), Constant::Data(value)) => {
-                            map.push((key.clone(), value.clone()));
-                        }
-                        _ => unreachable!(),
-                    }
+                    let (Constant::Data(key), Constant::Data(value)) =
+                        (left.as_ref(), right.as_ref())
+                    else {
+                        unreachable!()
+                    };
+
+                    map.push((key.clone(), value.clone()));
                 }
 
                 let value = Value::data(PlutusData::Map(map.into()));
@@ -809,7 +796,7 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::ListData => {
-                let (_, list) = args[0].unwrap_list();
+                let list = args[0].unwrap_data_list()?;
 
                 let data_list: Vec<PlutusData> = list
                     .iter()
@@ -824,14 +811,14 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::IData => {
-                let i = args[0].unwrap_integer();
+                let i = args[0].unwrap_integer()?;
 
                 let value = Value::data(PlutusData::BigInt(to_pallas_bigint(i)));
 
                 Ok(value)
             }
             DefaultFunction::BData => {
-                let b = args[0].unwrap_byte_string();
+                let b = args[0].unwrap_byte_string()?;
 
                 let value = Value::data(PlutusData::BoundedBytes(b.clone().try_into().unwrap()));
 
@@ -870,10 +857,7 @@ impl DefaultFunction {
 
                     Ok(value)
                 }
-                v => Err(Error::DeserialisationError(
-                    "UnConstrData".to_string(),
-                    v.clone(),
-                )),
+                v => Err(Error::NotAConstant(v.clone())),
             },
             DefaultFunction::UnMapData => match &args[0] {
                 v @ Value::Con(inner) => {
@@ -903,10 +887,7 @@ impl DefaultFunction {
 
                     Ok(value)
                 }
-                v => Err(Error::DeserialisationError(
-                    "UnMapData".to_string(),
-                    v.clone(),
-                )),
+                v => Err(Error::NotAConstant(v.clone())),
             },
             DefaultFunction::UnListData => match &args[0] {
                 v @ Value::Con(inner) => {
@@ -927,10 +908,7 @@ impl DefaultFunction {
 
                     Ok(value)
                 }
-                v => Err(Error::DeserialisationError(
-                    "UnListData".to_string(),
-                    v.clone(),
-                )),
+                v => Err(Error::NotAConstant(v.clone())),
             },
             DefaultFunction::UnIData => match &args[0] {
                 v @ Value::Con(inner) => {
@@ -945,10 +923,7 @@ impl DefaultFunction {
 
                     Ok(value)
                 }
-                v => Err(Error::DeserialisationError(
-                    "UnIData".to_string(),
-                    v.clone(),
-                )),
+                v => Err(Error::NotAConstant(v.clone())),
             },
             DefaultFunction::UnBData => match &args[0] {
                 v @ Value::Con(inner) => {
@@ -963,34 +938,18 @@ impl DefaultFunction {
 
                     Ok(value)
                 }
-                v => Err(Error::DeserialisationError(
-                    "UnBData".to_string(),
-                    v.clone(),
-                )),
+                v => Err(Error::NotAConstant(v.clone())),
             },
             DefaultFunction::EqualsData => {
-                let (Value::Con(inner1), Value::Con(inner2)) = (&args[0], &args[1]) else {
-                    unreachable!()
-                };
-
-                let Constant::Data(d1) = inner1.as_ref() else {
-                    unreachable!()
-                };
-                let Constant::Data(d2) = inner2.as_ref() else {
-                    unreachable!()
-                };
+                let d1 = args[0].unwrap_data()?;
+                let d2 = args[1].unwrap_data()?;
 
                 let value = Value::bool(d1.eq(d2));
 
                 Ok(value)
             }
             DefaultFunction::SerialiseData => {
-                let Value::Con(inner) = &args[0] else {
-                    unreachable!()
-                };
-                let Constant::Data(d) = inner.as_ref() else {
-                    unreachable!()
-                };
+                let d = args[0].unwrap_data()?;
 
                 let serialized_data = plutus_data_to_bytes(d).unwrap();
 
@@ -999,16 +958,8 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::MkPairData => {
-                let (Value::Con(inner1), Value::Con(inner2)) = (&args[0], &args[1]) else {
-                    unreachable!()
-                };
-
-                let Constant::Data(d1) = inner1.as_ref() else {
-                    unreachable!()
-                };
-                let Constant::Data(d2) = inner2.as_ref() else {
-                    unreachable!()
-                };
+                let d1 = args[0].unwrap_data()?;
+                let d2 = args[1].unwrap_data()?;
 
                 let constant = Constant::ProtoPair(
                     Type::Data,
@@ -1022,11 +973,15 @@ impl DefaultFunction {
                 Ok(value)
             }
             DefaultFunction::MkNilData => {
+                args[0].unwrap_unit()?;
+
                 let value = Value::list(Type::Data, vec![]);
 
                 Ok(value)
             }
             DefaultFunction::MkNilPairData => {
+                args[0].unwrap_unit()?;
+
                 let constant = Constant::ProtoList(
                     Type::Pair(Rc::new(Type::Data), Rc::new(Type::Data)),
                     vec![],
@@ -1036,7 +991,402 @@ impl DefaultFunction {
 
                 Ok(value)
             }
+
+            DefaultFunction::Bls12_381_G1_Add => {
+                let arg1 = args[0].unwrap_bls12_381_g1_element()?;
+                let arg2 = args[1].unwrap_bls12_381_g1_element()?;
+
+                let mut out = blst::blst_p1::default();
+
+                unsafe {
+                    blst::blst_p1_add_or_double(
+                        &mut out as *mut _,
+                        arg1 as *const _,
+                        arg2 as *const _,
+                    );
+                }
+
+                let constant = Constant::Bls12_381G1Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G1_Neg => {
+                let arg1 = args[0].unwrap_bls12_381_g1_element()?;
+
+                let mut out = *arg1;
+
+                unsafe {
+                    blst::blst_p1_cneg(
+                        &mut out as *mut _,
+                        // This was true in the Cardano code
+                        true,
+                    );
+                }
+
+                let constant = Constant::Bls12_381G1Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G1_ScalarMul => {
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_bls12_381_g1_element()?;
+
+                let size_scalar = size_of::<blst::blst_scalar>();
+
+                let arg1 = arg1.mod_floor(&SCALAR_PERIOD);
+
+                let (_, mut arg1) = arg1.to_bytes_be();
+
+                if size_scalar > arg1.len() {
+                    let diff = size_scalar - arg1.len();
+
+                    let mut new_vec = vec![0; diff];
+
+                    new_vec.append(&mut arg1);
+
+                    arg1 = new_vec;
+                }
+
+                let mut out = blst::blst_p1::default();
+                let mut scalar = blst::blst_scalar::default();
+
+                unsafe {
+                    blst::blst_scalar_from_bendian(
+                        &mut scalar as *mut _,
+                        arg1.as_ptr() as *const _,
+                    );
+
+                    blst::blst_p1_mult(
+                        &mut out as *mut _,
+                        arg2 as *const _,
+                        scalar.b.as_ptr() as *const _,
+                        size_scalar * 8,
+                    );
+                }
+
+                let constant = Constant::Bls12_381G1Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G1_Equal => {
+                let arg1 = args[0].unwrap_bls12_381_g1_element()?;
+                let arg2 = args[1].unwrap_bls12_381_g1_element()?;
+
+                let is_equal = unsafe { blst::blst_p1_is_equal(arg1, arg2) };
+
+                let constant = Constant::Bool(is_equal);
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G1_Compress => {
+                let arg1 = args[0].unwrap_bls12_381_g1_element()?;
+
+                let out = arg1.compress();
+
+                let constant = Constant::ByteString(out.to_vec());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G1_Uncompress => {
+                let arg1 = args[0].unwrap_byte_string()?;
+
+                let out = blst::blst_p1::uncompress(arg1)?;
+
+                let constant = Constant::Bls12_381G1Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G1_HashToGroup => {
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_byte_string()?;
+
+                if arg2.len() > 255 {
+                    return Err(Error::HashToCurveDstTooBig);
+                }
+
+                let mut out = blst::blst_p1::default();
+                let aug = [];
+
+                unsafe {
+                    blst::blst_hash_to_g1(
+                        &mut out as *mut _,
+                        arg1.as_ptr(),
+                        arg1.len(),
+                        arg2.as_ptr(),
+                        arg2.len(),
+                        aug.as_ptr(),
+                        0,
+                    );
+                };
+
+                let constant = Constant::Bls12_381G1Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_Add => {
+                let arg1 = args[0].unwrap_bls12_381_g2_element()?;
+                let arg2 = args[1].unwrap_bls12_381_g2_element()?;
+
+                let mut out = blst::blst_p2::default();
+
+                unsafe {
+                    blst::blst_p2_add_or_double(
+                        &mut out as *mut _,
+                        arg1 as *const _,
+                        arg2 as *const _,
+                    );
+                }
+
+                let constant = Constant::Bls12_381G2Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_Neg => {
+                let arg1 = args[0].unwrap_bls12_381_g2_element()?;
+
+                let mut out = *arg1;
+
+                unsafe {
+                    blst::blst_p2_cneg(
+                        &mut out as *mut _,
+                        // This was true in the Cardano code
+                        true,
+                    );
+                }
+
+                let constant = Constant::Bls12_381G2Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_ScalarMul => {
+                let arg1 = args[0].unwrap_integer()?;
+                let arg2 = args[1].unwrap_bls12_381_g2_element()?;
+
+                let size_scalar = size_of::<blst::blst_scalar>();
+
+                let arg1 = arg1.mod_floor(&SCALAR_PERIOD);
+
+                let (_, mut arg1) = arg1.to_bytes_be();
+
+                if size_scalar > arg1.len() {
+                    let diff = size_scalar - arg1.len();
+
+                    let mut new_vec = vec![0; diff];
+
+                    new_vec.append(&mut arg1);
+
+                    arg1 = new_vec;
+                }
+
+                let mut out = blst::blst_p2::default();
+                let mut scalar = blst::blst_scalar::default();
+
+                unsafe {
+                    blst::blst_scalar_from_bendian(
+                        &mut scalar as *mut _,
+                        arg1.as_ptr() as *const _,
+                    );
+
+                    blst::blst_p2_mult(
+                        &mut out as *mut _,
+                        arg2 as *const _,
+                        scalar.b.as_ptr() as *const _,
+                        size_scalar * 8,
+                    );
+                }
+
+                let constant = Constant::Bls12_381G2Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_Equal => {
+                let arg1 = args[0].unwrap_bls12_381_g2_element()?;
+                let arg2 = args[1].unwrap_bls12_381_g2_element()?;
+
+                let is_equal = unsafe { blst::blst_p2_is_equal(arg1, arg2) };
+
+                let constant = Constant::Bool(is_equal);
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_Compress => {
+                let arg1 = args[0].unwrap_bls12_381_g2_element()?;
+
+                let out = arg1.compress();
+
+                let constant = Constant::ByteString(out.to_vec());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_Uncompress => {
+                let arg1 = args[0].unwrap_byte_string()?;
+
+                let out = blst::blst_p2::uncompress(arg1)?;
+
+                let constant = Constant::Bls12_381G2Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_G2_HashToGroup => {
+                let arg1 = args[0].unwrap_byte_string()?;
+                let arg2 = args[1].unwrap_byte_string()?;
+
+                if arg2.len() > 255 {
+                    return Err(Error::HashToCurveDstTooBig);
+                }
+
+                let mut out = blst::blst_p2::default();
+                let aug = [];
+
+                unsafe {
+                    blst::blst_hash_to_g2(
+                        &mut out as *mut _,
+                        arg1.as_ptr(),
+                        arg1.len(),
+                        arg2.as_ptr(),
+                        arg2.len(),
+                        aug.as_ptr(),
+                        0,
+                    );
+                };
+
+                let constant = Constant::Bls12_381G2Element(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_MillerLoop => {
+                let arg1 = args[0].unwrap_bls12_381_g1_element()?;
+                let arg2 = args[1].unwrap_bls12_381_g2_element()?;
+
+                let mut out = blst::blst_fp12::default();
+
+                let mut affine1 = blst::blst_p1_affine::default();
+                let mut affine2 = blst::blst_p2_affine::default();
+
+                unsafe {
+                    blst::blst_p1_to_affine(&mut affine1 as *mut _, arg1);
+                    blst::blst_p2_to_affine(&mut affine2 as *mut _, arg2);
+
+                    blst::blst_miller_loop(&mut out as *mut _, &affine2, &affine1);
+                }
+
+                let constant = Constant::Bls12_381MlResult(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_MulMlResult => {
+                let arg1 = args[0].unwrap_bls12_381_ml_result()?;
+                let arg2 = args[1].unwrap_bls12_381_ml_result()?;
+
+                let mut out = blst::blst_fp12::default();
+
+                unsafe {
+                    blst::blst_fp12_mul(&mut out as *mut _, arg1, arg2);
+                }
+
+                let constant = Constant::Bls12_381MlResult(out.into());
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::Bls12_381_FinalVerify => {
+                let arg1 = args[0].unwrap_bls12_381_ml_result()?;
+                let arg2 = args[1].unwrap_bls12_381_ml_result()?;
+
+                let verified = unsafe { blst::blst_fp12_finalverify(arg1, arg2) };
+
+                let constant = Constant::Bool(verified);
+
+                Ok(Value::Con(constant.into()))
+            }
         }
+    }
+}
+
+pub trait Compressable {
+    fn compress(&self) -> Vec<u8>;
+
+    fn uncompress(bytes: &[u8]) -> Result<Self, Error>
+    where
+        Self: std::marker::Sized;
+}
+
+impl Compressable for blst::blst_p1 {
+    fn compress(&self) -> Vec<u8> {
+        let mut out = [0; BLST_P1_COMPRESSED_SIZE];
+
+        unsafe {
+            blst::blst_p1_compress(&mut out as *mut _, self);
+        };
+
+        out.to_vec()
+    }
+
+    fn uncompress(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != BLST_P1_COMPRESSED_SIZE {
+            return Err(Error::Blst(blst::BLST_ERROR::BLST_BAD_ENCODING));
+        }
+
+        let mut affine = blst::blst_p1_affine::default();
+
+        let mut out = blst::blst_p1::default();
+
+        unsafe {
+            let err = blst::blst_p1_uncompress(&mut affine as *mut _, bytes.as_ptr());
+
+            if err != blst::BLST_ERROR::BLST_SUCCESS {
+                return Err(Error::Blst(err));
+            }
+
+            blst::blst_p1_from_affine(&mut out as *mut _, &affine);
+
+            let in_group = blst::blst_p1_in_g1(&out);
+
+            if !in_group {
+                return Err(Error::Blst(blst::BLST_ERROR::BLST_POINT_NOT_IN_GROUP));
+            }
+        };
+
+        Ok(out)
+    }
+}
+
+impl Compressable for blst::blst_p2 {
+    fn compress(&self) -> Vec<u8> {
+        let mut out = [0; BLST_P2_COMPRESSED_SIZE];
+
+        unsafe {
+            blst::blst_p2_compress(&mut out as *mut _, self);
+        };
+
+        out.to_vec()
+    }
+
+    fn uncompress(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != BLST_P2_COMPRESSED_SIZE {
+            return Err(Error::Blst(blst::BLST_ERROR::BLST_BAD_ENCODING));
+        }
+
+        let mut affine = blst::blst_p2_affine::default();
+
+        let mut out = blst::blst_p2::default();
+
+        unsafe {
+            let err = blst::blst_p2_uncompress(&mut affine as *mut _, bytes.as_ptr());
+
+            if err != blst::BLST_ERROR::BLST_SUCCESS {
+                return Err(Error::Blst(err));
+            }
+
+            blst::blst_p2_from_affine(&mut out as *mut _, &affine);
+
+            let in_group = blst::blst_p2_in_g2(&out);
+
+            if !in_group {
+                return Err(Error::Blst(blst::BLST_ERROR::BLST_POINT_NOT_IN_GROUP));
+            }
+        };
+
+        Ok(out)
     }
 }
 

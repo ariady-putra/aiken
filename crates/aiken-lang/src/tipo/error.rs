@@ -479,7 +479,7 @@ If you really meant to return that last expression, try to replace it with the f
     },
 
     #[error("{}\n", if *is_let {
-          "I noticed a let assignment matching a value with more than one constructor.".to_string()
+          "I noticed a let assignment matching a value with more than one pattern.".to_string()
       } else {
           format!(
               "I realized that a given '{keyword_when}/{keyword_is}' expression is non-exhaustive.",
@@ -1131,15 +1131,15 @@ fn suggest_constructor_pattern(
 }
 
 fn suggest_unify(
-    expected: &Rc<Type>,
-    given: &Rc<Type>,
+    expected: &Type,
+    given: &Type,
     situation: &Option<UnifyErrorSituation>,
     rigid_type_names: &HashMap<u64, String>,
 ) -> String {
     let expected_str = expected.to_pretty_with_names(rigid_type_names.clone(), 0);
     let given_str = given.to_pretty_with_names(rigid_type_names.clone(), 0);
 
-    let (expected, given) = match (expected.as_ref(), given.as_ref()) {
+    let (expected, given) = match (expected, given) {
         (
             Type::App {
                 module: expected_module,
@@ -1363,13 +1363,6 @@ pub enum Warning {
         location: Span,
     },
 
-    #[error("I found a public definition in a validator module.\nDefinitions in validator modules do not need to be public.\n")]
-    #[diagnostic(code("redundant::pub"))]
-    PubInValidatorModule {
-        #[label]
-        location: Span,
-    },
-
     #[error("I found a when expression with a single clause.")]
     #[diagnostic(
         code("single_when_clause"),
@@ -1536,6 +1529,28 @@ pub enum Warning {
     },
 
     #[error(
+        "I came across a discarded variable in a let assignment: {}.\n",
+        name.if_supports_color(Stderr, |s| s.purple())
+    )]
+    #[diagnostic(help("{}", formatdoc! {
+        r#"If you do want to enforce some side-effects, use {keyword_expect} with {name} instead of {keyword_let}.
+
+           You should also know that, unlike in typical imperative languages, unused let-bindings are {fully_ignored} in Aiken.
+           They will not produce any side-effect (such as error calls). Programs with or without unused variables are semantically equivalent.
+        "#,
+        fully_ignored = "fully_ignored".if_supports_color(Stderr, |s| s.bold()),
+        keyword_expect = "expect".if_supports_color(Stderr, |s| s.yellow()),
+        keyword_let = "let".if_supports_color(Stderr, |s| s.yellow()),
+        name = name.if_supports_color(Stderr, |s| s.yellow())
+    }))]
+    #[diagnostic(code("unused::discarded_let_assignment"))]
+    DiscardedLetAssignment {
+        #[label("discarded")]
+        location: Span,
+        name: String,
+    },
+
+    #[error(
         "I came across a validator in a {} module which means\nI'm going to ignore it.\n",
         "lib/".if_supports_color(Stderr, |s| s.purple())
     )]
@@ -1585,7 +1600,6 @@ impl ExtraData for Warning {
             Warning::AllFieldsRecordUpdate { .. }
             | Warning::ImplicitlyDiscardedResult { .. }
             | Warning::NoFieldsRecordUpdate { .. }
-            | Warning::PubInValidatorModule { .. }
             | Warning::SingleConstructorExpect { .. }
             | Warning::SingleWhenClause { .. }
             | Warning::Todo { .. }
@@ -1595,8 +1609,9 @@ impl ExtraData for Warning {
             | Warning::UnusedPrivateModuleConstant { .. }
             | Warning::UnusedType { .. }
             | Warning::UnusedVariable { .. }
-            | Warning::Utf8ByteArrayIsValidHexString { .. }
+            | Warning::DiscardedLetAssignment { .. }
             | Warning::ValidatorInLibraryModule { .. } => None,
+            Warning::Utf8ByteArrayIsValidHexString { value, .. } => Some(value.clone()),
             Warning::UnusedImportedModule { location, .. } => {
                 Some(format!("{},{}", false, location.start))
             }
@@ -1630,7 +1645,7 @@ pub enum UnknownRecordFieldSituation {
 
 fn format_suggestion(sample: &UntypedExpr) -> String {
     Formatter::new()
-        .expr(sample)
+        .expr(sample, false)
         .to_pretty_string(70)
         .lines()
         .enumerate()
