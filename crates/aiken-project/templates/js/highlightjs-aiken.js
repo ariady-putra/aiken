@@ -133,4 +133,4 @@ function highlightJS(hljs) {
       NUMBER,
     ],
   };
-};
+}

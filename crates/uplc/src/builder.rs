@@ -38,6 +38,14 @@ impl<T> Term<T> {
         Term::Constant(Constant::ByteString(b).into())
     }
 
+    pub fn bls12_381_g1(b: blst::blst_p1) -> Self {
+        Term::Constant(Constant::Bls12_381G1Element(b.into()).into())
+    }
+
+    pub fn bls12_381_g2(b: blst::blst_p2) -> Self {
+        Term::Constant(Constant::Bls12_381G2Element(b.into()).into())
+    }
+
     pub fn bool(b: bool) -> Self {
         Term::Constant(Constant::Bool(b).into())
     }
@@ -97,8 +105,64 @@ impl<T> Term<T> {
         Term::Builtin(DefaultFunction::BData)
     }
 
+    pub fn blake2b_224() -> Self {
+        Term::Builtin(DefaultFunction::Blake2b_224)
+    }
+
     pub fn blake2b_256() -> Self {
         Term::Builtin(DefaultFunction::Blake2b_256)
+    }
+
+    pub fn bls12_381_g1_add() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_Add)
+    }
+    pub fn bls12_381_g1_neg() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_Neg)
+    }
+    pub fn bls12_381_g1_scalar_mul() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_ScalarMul)
+    }
+    pub fn bls12_381_g1_equal() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_Equal)
+    }
+    pub fn bls12_381_g1_compress() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_Compress)
+    }
+    pub fn bls12_381_g1_uncompress() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_Uncompress)
+    }
+    pub fn bls12_381_g1_hash_to_group() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G1_HashToGroup)
+    }
+    pub fn bls12_381_g2_add() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_Add)
+    }
+    pub fn bls12_381_g2_neg() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_Neg)
+    }
+    pub fn bls12_381_g2_scalar_mul() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_ScalarMul)
+    }
+    pub fn bls12_381_g2_equal() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_Equal)
+    }
+    pub fn bls12_381_g2_compress() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_Compress)
+    }
+    pub fn bls12_381_g2_uncompress() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_Uncompress)
+    }
+    pub fn bls12_381_g2_hash_to_group() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_G2_HashToGroup)
+    }
+    pub fn bls12_381_miller_loop() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_MillerLoop)
+    }
+    pub fn bls12_381_mul_ml_result() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_MulMlResult)
+    }
+    pub fn bls12_381_final_verify() -> Self {
+        Term::Builtin(DefaultFunction::Bls12_381_FinalVerify)
     }
 
     pub fn choose_data(
@@ -197,6 +261,10 @@ impl<T> Term<T> {
 
     pub fn index_bytearray() -> Self {
         Term::Builtin(DefaultFunction::IndexByteString)
+    }
+
+    pub fn keccak_256() -> Self {
+        Term::Builtin(DefaultFunction::Keccak_256)
     }
 
     pub fn length_of_bytearray() -> Self {

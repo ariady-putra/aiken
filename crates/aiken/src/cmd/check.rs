@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use aiken_project::watch::{self, watch_project, with_project};
+use std::{path::PathBuf, process};
 
 #[derive(clap::Args)]
 /// Type-check an Aiken project
@@ -17,6 +18,10 @@ pub struct Args {
     /// When enabled, also pretty-print test UPLC on failure
     #[clap(long)]
     debug: bool,
+
+    /// When enabled, re-run the command on file changes instead of exiting
+    #[clap(long)]
+    watch: bool,
 
     /// Only run tests if they match any of these strings.
     /// You can match a module with `-m aiken/list` or `-m list`.
@@ -43,15 +48,31 @@ pub fn exec(
         match_tests,
         exact_match,
         no_traces,
+        watch,
+        ..
     }: Args,
 ) -> miette::Result<()> {
-    crate::with_project(directory, deny, |p| {
-        p.check(
-            skip_tests,
-            match_tests.clone(),
-            debug,
-            exact_match,
-            (!no_traces).into(),
-        )
-    })
+    let result = if watch {
+        watch_project(directory.as_deref(), watch::default_filter, 500, |p| {
+            p.check(
+                skip_tests,
+                match_tests.clone(),
+                debug,
+                exact_match,
+                (!no_traces).into(),
+            )
+        })
+    } else {
+        with_project(directory.as_deref(), deny, |p| {
+            p.check(
+                skip_tests,
+                match_tests.clone(),
+                debug,
+                exact_match,
+                (!no_traces).into(),
+            )
+        })
+    };
+
+    result.map_err(|_| process::exit(1))
 }

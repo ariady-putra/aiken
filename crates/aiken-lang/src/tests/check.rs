@@ -421,7 +421,7 @@ fn exhaustiveness_missing_constr_with_args() {
         }
 
         fn foo() {
-          let thing = Bar 
+          let thing = Bar
           when thing is {
             Bar -> True
           }
@@ -963,6 +963,46 @@ fn list_pattern_6() {
 }
 
 #[test]
+fn spread_with_positional_constr_args() {
+    let source_code = r#"
+        type Redeemer {
+          First(Int)
+          Second
+        }
+
+        fn foo(redeemer: Redeemer) {
+          when redeemer is {
+            First(..) -> True
+            Second -> True
+          }
+        }
+    "#;
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn unnecessary_spread_with_positional_constr_args() {
+    let source_code = r#"
+        type Redeemer {
+          First(Int)
+          Second
+        }
+
+        fn foo(redeemer: Redeemer) {
+          when redeemer is {
+            First(x, ..) -> True
+            Second -> True
+          }
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::UnnecessarySpreadOperator { .. }))
+    ))
+}
+
+#[test]
 fn trace_strings() {
     let source_code = r#"
         fn bar() {
@@ -1124,7 +1164,7 @@ fn pipe_with_wrong_type_and_full_args() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((
             _,
             Error::CouldNotUnify {
@@ -1172,7 +1212,7 @@ fn discarded_let_bindings() {
     let (warnings, ast) = check(parse(source_code)).unwrap();
 
     assert!(matches!(warnings[0], Warning::UnusedVariable { ref name, .. } if name == "unused"));
-    assert!(matches!(warnings[1], Warning::UnusedVariable { ref name, .. } if name == "_"));
+    assert!(matches!(warnings[1], Warning::DiscardedLetAssignment { ref name, .. } if name == "_"));
 
     // Controls that unused let-bindings have been erased from the transformed AST.
     match ast.definitions.first() {
