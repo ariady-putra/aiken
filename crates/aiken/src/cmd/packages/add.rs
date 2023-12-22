@@ -1,6 +1,7 @@
 use aiken_project::{
     config::{Config, Dependency, Platform},
     error::Warning,
+    github::repo::{DefaultBranch, LatestRelease, Releases},
     package_name::PackageName,
     pretty,
 };
@@ -9,6 +10,7 @@ use owo_colors::{OwoColorize, Stream::Stderr};
 use std::{path::PathBuf, process, str::FromStr};
 
 #[derive(clap::Args)]
+#[clap(disable_version_flag = true)]
 /// Add a new project package as dependency
 pub struct Args {
     /// Package name, in the form of {owner}/{repository}.
@@ -20,7 +22,7 @@ pub struct Args {
     pub package: String,
     /// The package version, as a git commit hash, a tag or a branch name.
     #[clap(long)]
-    pub version: String,
+    pub version: Option<String>,
 
     #[clap(hide = true, long)]
     pub overwrite: bool,
@@ -29,9 +31,27 @@ pub struct Args {
 pub fn exec(args: Args) -> miette::Result<()> {
     let root = PathBuf::from(".");
 
+    let default_branch = || match DefaultBranch::of(&args.package) {
+        Ok(branch) => branch.commit.sha,
+        _ => "main".to_string(),
+    };
+    let default_version = || {
+        if let Ok(release) = LatestRelease::of(&args.package) {
+            return release.tag_name;
+        }
+
+        if let Ok(releases) = Releases::of(&args.package) {
+            if let Some(release) = releases.first() {
+                return release.tag_name.clone();
+            }
+        }
+
+        default_branch()
+    };
+
     let dependency = Dependency {
         name: PackageName::from_str(&args.package)?,
-        version: args.version,
+        version: args.version.unwrap_or_else(default_version),
         source: Platform::Github,
     };
 
