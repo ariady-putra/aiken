@@ -1,9 +1,14 @@
 use self::{environment::Environment, pretty::Printer};
 use crate::{
-    ast::{Constant, DefinitionLocation, ModuleKind, Span},
+    ast::{
+        Annotation, Constant, DataType, DataTypeKey, DefinitionLocation, ModuleKind, Span,
+        TypedDataType,
+    },
     builtins::{G1_ELEMENT, G2_ELEMENT, MILLER_LOOP_RESULT},
     tipo::fields::FieldMap,
 };
+use indexmap::IndexMap;
+use itertools::Itertools;
 use std::{cell::RefCell, collections::HashMap, ops::Deref, rc::Rc};
 use uplc::{ast::Type as UplcType, builtins::DefaultFunction};
 
@@ -18,7 +23,14 @@ mod pattern;
 mod pipe;
 pub mod pretty;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TypeAliasAnnotation {
+    pub alias: String,
+    pub parameters: Vec<String>,
+    pub annotation: Annotation,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Type {
     /// A nominal (named) type such as `Int`, `Float`, or a programmer defined
     /// custom type such as `Person`. The type can take other types as
@@ -33,6 +45,7 @@ pub enum Type {
         module: String,
         name: String,
         args: Vec<Rc<Type>>,
+        alias: Option<Rc<TypeAliasAnnotation>>,
     },
 
     /// The type of a function. It takes arguments and returns a value.
@@ -40,12 +53,14 @@ pub enum Type {
     Fn {
         args: Vec<Rc<Type>>,
         ret: Rc<Type>,
+        alias: Option<Rc<TypeAliasAnnotation>>,
     },
 
     /// A type variable. See the contained `TypeVar` enum for more information.
     ///
     Var {
         tipo: Rc<RefCell<TypeVar>>,
+        alias: Option<Rc<TypeAliasAnnotation>>,
     },
     // /// A tuple is an ordered collection of 0 or more values, each of which
     // /// can have a different type, so the `tuple` type is the sum of all the
@@ -53,10 +68,119 @@ pub enum Type {
     // ///
     Tuple {
         elems: Vec<Rc<Type>>,
+        alias: Option<Rc<TypeAliasAnnotation>>,
     },
 }
 
+impl PartialEq for Type {
+    fn eq(&self, other: &Type) -> bool {
+        match self {
+            Type::App {
+                public,
+                module,
+                name,
+                args,
+                ..
+            } => {
+                if let Type::App {
+                    public: public2,
+                    module: module2,
+                    name: name2,
+                    args: args2,
+                    ..
+                } = other
+                {
+                    name == name2
+                        && module == module2
+                        && public == public2
+                        && args.iter().zip(args2).all(|(left, right)| left == right)
+                } else {
+                    false
+                }
+            }
+
+            Type::Fn { args, ret, .. } => {
+                if let Type::Fn {
+                    args: args2,
+                    ret: ret2,
+                    ..
+                } = other
+                {
+                    ret == ret2 && args.iter().zip(args2).all(|(left, right)| left == right)
+                } else {
+                    false
+                }
+            }
+
+            Type::Tuple { elems, .. } => {
+                if let Type::Tuple { elems: elems2, .. } = other {
+                    elems.iter().zip(elems2).all(|(left, right)| left == right)
+                } else {
+                    false
+                }
+            }
+
+            Type::Var { tipo, .. } => {
+                if let Type::Var { tipo: tipo2, .. } = other {
+                    tipo == tipo2
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
 impl Type {
+    pub fn alias(&self) -> Option<Rc<TypeAliasAnnotation>> {
+        match self {
+            Type::App { alias, .. }
+            | Type::Fn { alias, .. }
+            | Type::Var { alias, .. }
+            | Type::Tuple { alias, .. } => alias.clone(),
+        }
+    }
+
+    pub fn with_alias(tipo: Rc<Type>, alias: Option<Rc<TypeAliasAnnotation>>) -> Rc<Type> {
+        match alias {
+            None => tipo,
+            Some(alias) => tipo.deref().to_owned().set_alias(Some(alias)),
+        }
+    }
+
+    pub fn set_alias(self, alias: Option<Rc<TypeAliasAnnotation>>) -> Rc<Type> {
+        Rc::new(match self {
+            Type::App {
+                public,
+                module,
+                name,
+                args,
+                ..
+            } => Type::App {
+                public,
+                module,
+                name,
+                args,
+                alias,
+            },
+            Type::Fn { args, ret, .. } => Type::Fn { args, ret, alias },
+            Type::Var { tipo, .. } => Type::Var { tipo, alias },
+            Type::Tuple { elems, .. } => Type::Tuple { elems, alias },
+        })
+    }
+
+    pub fn qualifier(&self) -> Option<(String, String)> {
+        match self {
+            Type::App { module, name, .. } => Some((module.to_string(), name.to_string())),
+            Type::Fn { .. } => None,
+            Type::Var { ref tipo, .. } => match &*tipo.borrow() {
+                TypeVar::Link { ref tipo } => tipo.qualifier(),
+                _ => None,
+            },
+            Type::Tuple { .. } => Some((String::new(), "Tuple".to_string())),
+        }
+    }
+
     pub fn is_result_constructor(&self) -> bool {
         match self {
             Type::Fn { ret, .. } => ret.is_result(),
@@ -69,7 +193,7 @@ impl Type {
     }
 
     pub fn is_unbound(&self) -> bool {
-        matches!(self, Self::Var { tipo } if tipo.borrow().is_unbound())
+        matches!(self, Self::Var { tipo, .. } if tipo.borrow().is_unbound())
     }
 
     pub fn is_function(&self) -> bool {
@@ -102,7 +226,7 @@ impl Type {
     pub fn is_void(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "Void" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_void(),
+            Self::Var { tipo, .. } => tipo.borrow().is_void(),
             _ => false,
         }
     }
@@ -110,7 +234,7 @@ impl Type {
     pub fn is_bool(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "Bool" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_bool(),
+            Self::Var { tipo, .. } => tipo.borrow().is_bool(),
             _ => false,
         }
     }
@@ -118,7 +242,7 @@ impl Type {
     pub fn is_int(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "Int" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_int(),
+            Self::Var { tipo, .. } => tipo.borrow().is_int(),
             _ => false,
         }
     }
@@ -126,7 +250,7 @@ impl Type {
     pub fn is_bytearray(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "ByteArray" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_bytearray(),
+            Self::Var { tipo, .. } => tipo.borrow().is_bytearray(),
             _ => false,
         }
     }
@@ -135,7 +259,7 @@ impl Type {
         match self {
             Self::App { module, name, .. } => G1_ELEMENT == name && module.is_empty(),
 
-            Self::Var { tipo } => tipo.borrow().is_bls381_12_g1(),
+            Self::Var { tipo, .. } => tipo.borrow().is_bls381_12_g1(),
             _ => false,
         }
     }
@@ -144,7 +268,7 @@ impl Type {
         match self {
             Self::App { module, name, .. } => G2_ELEMENT == name && module.is_empty(),
 
-            Self::Var { tipo } => tipo.borrow().is_bls381_12_g2(),
+            Self::Var { tipo, .. } => tipo.borrow().is_bls381_12_g2(),
             _ => false,
         }
     }
@@ -153,7 +277,7 @@ impl Type {
         match self {
             Self::App { module, name, .. } => MILLER_LOOP_RESULT == name && module.is_empty(),
 
-            Self::Var { tipo } => tipo.borrow().is_ml_result(),
+            Self::Var { tipo, .. } => tipo.borrow().is_ml_result(),
             _ => false,
         }
     }
@@ -161,7 +285,7 @@ impl Type {
     pub fn is_string(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "String" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_string(),
+            Self::Var { tipo, .. } => tipo.borrow().is_string(),
             _ => false,
         }
     }
@@ -169,7 +293,7 @@ impl Type {
     pub fn is_list(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "List" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_list(),
+            Self::Var { tipo, .. } => tipo.borrow().is_list(),
             _ => false,
         }
     }
@@ -177,7 +301,7 @@ impl Type {
     pub fn is_option(&self) -> bool {
         match self {
             Self::App { module, name, .. } if "Option" == name && module.is_empty() => true,
-            Self::Var { tipo } => tipo.borrow().is_option(),
+            Self::Var { tipo, .. } => tipo.borrow().is_option(),
             _ => false,
         }
     }
@@ -186,23 +310,18 @@ impl Type {
         match self {
             Self::App {
                 module, name, args, ..
-            } if "List" == name && module.is_empty() => {
-                if let Type::Tuple { elems } = &*args[0] {
-                    elems.len() == 2
-                } else if let Type::Var { tipo } = &*args[0] {
-                    matches!(tipo.borrow().get_uplc_type(), Some(UplcType::Pair(_, _)))
-                } else {
-                    false
-                }
-            }
-            Self::Var { tipo } => tipo.borrow().is_map(),
+            } if "List" == name && module.is_empty() => args
+                .first()
+                .expect("unreachable: List should have an inner type")
+                .is_2_tuple(),
+            Self::Var { tipo, .. } => tipo.borrow().is_map(),
             _ => false,
         }
     }
 
     pub fn is_tuple(&self) -> bool {
         match self {
-            Type::Var { tipo } => tipo.borrow().is_tuple(),
+            Type::Var { tipo, .. } => tipo.borrow().is_tuple(),
             Type::Tuple { .. } => true,
             _ => false,
         }
@@ -210,8 +329,8 @@ impl Type {
 
     pub fn is_2_tuple(&self) -> bool {
         match self {
-            Type::Var { tipo } => tipo.borrow().is_2_tuple(),
-            Type::Tuple { elems } => elems.len() == 2,
+            Type::Var { tipo, .. } => tipo.borrow().is_2_tuple(),
+            Type::Tuple { elems, .. } => elems.len() == 2,
             _ => false,
         }
     }
@@ -219,7 +338,7 @@ impl Type {
     pub fn is_data(&self) -> bool {
         match self {
             Self::App { module, name, .. } => "Data" == name && module.is_empty(),
-            Self::Var { tipo } => tipo.borrow().is_data(),
+            Self::Var { tipo, .. } => tipo.borrow().is_data(),
             _ => false,
         }
     }
@@ -234,15 +353,15 @@ impl Type {
                 is_a_generic
             }
 
-            Type::Var { tipo } => tipo.borrow().is_generic(),
-            Type::Tuple { elems } => {
+            Type::Var { tipo, .. } => tipo.borrow().is_generic(),
+            Type::Tuple { elems, .. } => {
                 let mut is_a_generic = false;
                 for elem in elems {
                     is_a_generic = is_a_generic || elem.is_generic();
                 }
                 is_a_generic
             }
-            Type::Fn { args, ret } => {
+            Type::Fn { args, ret, .. } => {
                 let mut is_a_generic = false;
                 for arg in args {
                     is_a_generic = is_a_generic || arg.is_generic();
@@ -256,14 +375,14 @@ impl Type {
         match self {
             Self::Fn { args, .. } => Some(args.clone()),
             Self::App { args, .. } => Some(args.clone()),
-            Self::Var { tipo } => tipo.borrow().arg_types(),
+            Self::Var { tipo, .. } => tipo.borrow().arg_types(),
             _ => None,
         }
     }
 
     pub fn get_generic(&self) -> Option<u64> {
         match self {
-            Type::Var { tipo } => tipo.borrow().get_generic(),
+            Type::Var { tipo, .. } => tipo.borrow().get_generic(),
             _ => None,
         }
     }
@@ -272,24 +391,24 @@ impl Type {
         if self.is_list() {
             match self {
                 Self::App { args, .. } => args.clone(),
-                Self::Var { tipo } => tipo.borrow().get_inner_types(),
+                Self::Var { tipo, .. } => tipo.borrow().get_inner_types(),
                 _ => vec![],
             }
         } else if self.is_tuple() {
             match self {
-                Self::Tuple { elems } => elems.to_vec(),
-                Self::Var { tipo } => tipo.borrow().get_inner_types(),
+                Self::Tuple { elems, .. } => elems.to_vec(),
+                Self::Var { tipo, .. } => tipo.borrow().get_inner_types(),
                 _ => vec![],
             }
         } else if matches!(self.get_uplc_type(), UplcType::Data) {
             match self {
                 Type::App { args, .. } => args.clone(),
-                Type::Fn { args, ret } => {
+                Type::Fn { args, ret, .. } => {
                     let mut args = args.clone();
                     args.push(ret.clone());
                     args
                 }
-                Type::Var { tipo } => tipo.borrow().get_inner_types(),
+                Type::Var { tipo, .. } => tipo.borrow().get_inner_types(),
                 _ => unreachable!(),
             }
         } else {
@@ -312,16 +431,22 @@ impl Type {
             UplcType::List(UplcType::Data.into())
         } else if self.is_tuple() {
             match self {
-                Self::Tuple { elems } => {
+                Self::Tuple { elems, .. } => {
                     if elems.len() == 2 {
                         UplcType::Pair(UplcType::Data.into(), UplcType::Data.into())
                     } else {
                         UplcType::List(UplcType::Data.into())
                     }
                 }
-                Self::Var { tipo } => tipo.borrow().get_uplc_type().unwrap(),
+                Self::Var { tipo, .. } => tipo.borrow().get_uplc_type().unwrap(),
                 _ => unreachable!(),
             }
+        } else if self.is_bls381_12_g1() {
+            UplcType::Bls12_381G1Element
+        } else if self.is_bls381_12_g2() {
+            UplcType::Bls12_381G2Element
+        } else if self.is_ml_result() {
+            UplcType::Bls12_381MlResult
         } else {
             UplcType::Data
         }
@@ -353,7 +478,7 @@ impl Type {
                 }
             }
 
-            Self::Var { tipo } => {
+            Self::Var { tipo, alias } => {
                 let args: Vec<_> = match tipo.borrow().deref() {
                     TypeVar::Link { tipo } => {
                         return tipo.get_app_args(public, module, name, arity, environment);
@@ -370,10 +495,11 @@ impl Type {
                 // to the desired type.
                 *tipo.borrow_mut() = TypeVar::Link {
                     tipo: Rc::new(Self::App {
+                        public,
                         name: name.to_string(),
                         module: module.to_owned(),
                         args: args.clone(),
-                        public,
+                        alias: alias.to_owned(),
                     }),
                 };
                 Some(args)
@@ -424,7 +550,254 @@ impl Type {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+pub fn lookup_data_type_by_tipo(
+    data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
+    tipo: &Type,
+) -> Option<DataType<Rc<Type>>> {
+    match tipo {
+        Type::Fn { ret, .. } => match ret.as_ref() {
+            Type::App { module, name, .. } => {
+                let data_type_key = DataTypeKey {
+                    module_name: module.clone(),
+                    defined_type: name.clone(),
+                };
+                data_types.get(&data_type_key).map(|item| (*item).clone())
+            }
+            _ => None,
+        },
+        Type::App { module, name, .. } => {
+            let data_type_key = DataTypeKey {
+                module_name: module.clone(),
+                defined_type: name.clone(),
+            };
+
+            data_types.get(&data_type_key).map(|item| (*item).clone())
+        }
+        Type::Var { tipo, .. } => {
+            if let TypeVar::Link { tipo } = &*tipo.borrow() {
+                lookup_data_type_by_tipo(data_types, tipo)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn get_generic_id_and_type(tipo: &Type, param: &Type) -> Vec<(u64, Rc<Type>)> {
+    let mut generics_ids = vec![];
+
+    if let Some(id) = tipo.get_generic() {
+        generics_ids.push((id, param.clone().into()));
+        return generics_ids;
+    }
+
+    for (tipo, param_type) in tipo
+        .get_inner_types()
+        .iter()
+        .zip(param.get_inner_types().iter())
+    {
+        generics_ids.append(&mut get_generic_id_and_type(tipo, param_type));
+    }
+    generics_ids
+}
+
+pub fn get_arg_type_name(tipo: &Type) -> String {
+    match tipo {
+        Type::App { name, args, .. } => {
+            let inner_args = args.iter().map(|arg| get_arg_type_name(arg)).collect_vec();
+            format!("{}_{}", name, inner_args.join("_"))
+        }
+        Type::Var { tipo, .. } => match tipo.borrow().clone() {
+            TypeVar::Link { tipo } => get_arg_type_name(tipo.as_ref()),
+            _ => unreachable!(),
+        },
+        Type::Tuple { elems, .. } => {
+            let inner_args = elems.iter().map(|arg| get_arg_type_name(arg)).collect_vec();
+            inner_args.join("_")
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub fn convert_opaque_type(
+    t: &Rc<Type>,
+    data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
+    deep: bool,
+) -> Rc<Type> {
+    if check_replaceable_opaque_type(t, data_types) && matches!(t.as_ref(), Type::App { .. }) {
+        let data_type = lookup_data_type_by_tipo(data_types, t).unwrap();
+
+        let new_type_fields = data_type.typed_parameters;
+
+        let mut mono_type_vec = vec![];
+
+        for (tipo, param) in new_type_fields.iter().zip(t.arg_types().unwrap()) {
+            mono_type_vec.append(&mut get_generic_id_and_type(tipo, &param));
+        }
+        let mono_types = mono_type_vec.into_iter().collect();
+
+        let generic_type = &data_type.constructors[0].arguments[0].tipo;
+
+        let mono_type = find_and_replace_generics(generic_type, &mono_types);
+
+        if deep {
+            convert_opaque_type(&mono_type, data_types, deep)
+        } else {
+            mono_type
+        }
+    } else {
+        match t.as_ref() {
+            Type::App {
+                public,
+                module,
+                name,
+                args,
+                alias,
+            } => {
+                let mut new_args = vec![];
+                for arg in args {
+                    let arg = convert_opaque_type(arg, data_types, deep);
+                    new_args.push(arg);
+                }
+                Type::App {
+                    public: *public,
+                    module: module.clone(),
+                    name: name.clone(),
+                    args: new_args,
+                    alias: alias.clone(),
+                }
+                .into()
+            }
+            Type::Fn { args, ret, alias } => {
+                let mut new_args = vec![];
+                for arg in args {
+                    let arg = convert_opaque_type(arg, data_types, deep);
+                    new_args.push(arg);
+                }
+
+                let ret = convert_opaque_type(ret, data_types, deep);
+
+                Type::Fn {
+                    args: new_args,
+                    ret,
+                    alias: alias.clone(),
+                }
+                .into()
+            }
+            Type::Var { tipo: var_tipo, .. } => {
+                if let TypeVar::Link { tipo } = &var_tipo.borrow().clone() {
+                    convert_opaque_type(tipo, data_types, deep)
+                } else {
+                    t.clone()
+                }
+            }
+            Type::Tuple { elems, alias } => {
+                let mut new_elems = vec![];
+                for arg in elems {
+                    let arg = convert_opaque_type(arg, data_types, deep);
+                    new_elems.push(arg);
+                }
+                Type::Tuple {
+                    elems: new_elems,
+                    alias: alias.clone(),
+                }
+                .into()
+            }
+        }
+    }
+}
+
+pub fn check_replaceable_opaque_type(
+    t: &Type,
+    data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
+) -> bool {
+    let data_type = lookup_data_type_by_tipo(data_types, t);
+
+    if let Some(data_type) = data_type {
+        if let [constructor] = &data_type.constructors[..] {
+            return constructor.arguments.len() == 1 && data_type.opaque;
+        }
+    }
+
+    false
+}
+
+pub fn find_and_replace_generics(
+    tipo: &Rc<Type>,
+    mono_types: &IndexMap<u64, Rc<Type>>,
+) -> Rc<Type> {
+    if let Some(id) = tipo.get_generic() {
+        // If a generic does not have a type we know of
+        // like a None in option then just use same type
+        mono_types.get(&id).unwrap_or(tipo).clone()
+    } else if tipo.is_generic() {
+        match &**tipo {
+            Type::App {
+                args,
+                public,
+                module,
+                name,
+                alias,
+            } => {
+                let mut new_args = vec![];
+                for arg in args {
+                    let arg = find_and_replace_generics(arg, mono_types);
+                    new_args.push(arg);
+                }
+                let t = Type::App {
+                    args: new_args,
+                    public: *public,
+                    module: module.clone(),
+                    name: name.clone(),
+                    alias: alias.clone(),
+                };
+                t.into()
+            }
+            Type::Fn { args, ret, alias } => {
+                let mut new_args = vec![];
+                for arg in args {
+                    let arg = find_and_replace_generics(arg, mono_types);
+                    new_args.push(arg);
+                }
+
+                let ret = find_and_replace_generics(ret, mono_types);
+
+                let t = Type::Fn {
+                    args: new_args,
+                    ret,
+                    alias: alias.clone(),
+                };
+
+                t.into()
+            }
+            Type::Tuple { elems, alias } => {
+                let mut new_elems = vec![];
+                for elem in elems {
+                    let elem = find_and_replace_generics(elem, mono_types);
+                    new_elems.push(elem);
+                }
+                let t = Type::Tuple {
+                    elems: new_elems,
+                    alias: alias.clone(),
+                };
+                t.into()
+            }
+            Type::Var { tipo: var_tipo, .. } => {
+                let var_type = var_tipo.as_ref().borrow().clone();
+
+                match var_type {
+                    TypeVar::Link { tipo } => find_and_replace_generics(&tipo, mono_types),
+                    TypeVar::Generic { .. } | TypeVar::Unbound { .. } => unreachable!(),
+                }
+            }
+        }
+    } else {
+        tipo.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TypeVar {
     /// Unbound is an unbound variable. It is one specific type but we don't
     /// know what yet in the inference process. It has a unique id which can be used to
@@ -583,6 +956,7 @@ impl TypeVar {
             var => {
                 vec![Type::Var {
                     tipo: RefCell::new(var.clone()).into(),
+                    alias: None,
                 }
                 .into()]
             }
@@ -597,7 +971,7 @@ impl TypeVar {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValueConstructor {
     pub public: bool,
     pub variant: ValueConstructorVariant,
@@ -648,7 +1022,7 @@ impl ValueConstructor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ValueConstructorVariant {
     /// A locally defined variable or function parameter
     LocalVariable { location: Span },
@@ -745,7 +1119,7 @@ impl ValueConstructorVariant {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeInfo {
     pub name: String,
     pub kind: ModuleKind,
@@ -754,9 +1128,10 @@ pub struct TypeInfo {
     pub types_constructors: HashMap<String, Vec<String>>,
     pub values: HashMap<String, ValueConstructor>,
     pub accessors: HashMap<String, AccessorsMap>,
+    pub annotations: HashMap<Annotation, Rc<Type>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeConstructor {
     pub public: bool,
     pub location: Span,
@@ -765,14 +1140,14 @@ pub struct TypeConstructor {
     pub tipo: Rc<Type>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AccessorsMap {
     pub public: bool,
     pub tipo: Rc<Type>,
     pub accessors: HashMap<String, RecordAccessor>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordAccessor {
     // TODO: smaller int. Doesn't need to be this big
     pub index: u64,
@@ -780,7 +1155,7 @@ pub struct RecordAccessor {
     pub tipo: Rc<Type>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PatternConstructor {
     Record {
         name: String,
@@ -788,7 +1163,7 @@ pub enum PatternConstructor {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleValueConstructor {
     Record {
         name: String,

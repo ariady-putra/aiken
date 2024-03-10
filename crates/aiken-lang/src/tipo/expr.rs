@@ -1,20 +1,3 @@
-use std::{cmp::Ordering, collections::HashMap, rc::Rc};
-use vec1::Vec1;
-
-use crate::{
-    ast::{
-        Annotation, Arg, ArgName, AssignmentKind, BinOp, Bls12_381Point, ByteArrayFormatPreference,
-        CallArg, ClauseGuard, Constant, Curve, IfBranch, LogicalOpChainKind, RecordUpdateSpread,
-        Span, TraceKind, Tracing, TypedArg, TypedCallArg, TypedClause, TypedClauseGuard,
-        TypedIfBranch, TypedPattern, TypedRecordUpdateArg, UnOp, UntypedArg, UntypedClause,
-        UntypedClauseGuard, UntypedIfBranch, UntypedPattern, UntypedRecordUpdateArg,
-    },
-    builtins::{bool, byte_array, function, g1_element, g2_element, int, list, string, tuple},
-    expr::{FnStyle, TypedExpr, UntypedExpr},
-    format,
-    tipo::fields::FieldMap,
-};
-
 use super::{
     environment::{assert_no_labeled_arguments, collapse_links, EntityKind, Environment},
     error::{Error, Warning},
@@ -23,9 +6,30 @@ use super::{
     pipe::PipeTyper,
     RecordAccessor, Type, ValueConstructor, ValueConstructorVariant,
 };
+use crate::{
+    ast::{
+        Annotation, Arg, ArgName, AssignmentKind, BinOp, Bls12_381Point, ByteArrayFormatPreference,
+        CallArg, ClauseGuard, Constant, Curve, IfBranch, LogicalOpChainKind, Pattern,
+        RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing, TypedArg, TypedCallArg,
+        TypedClause, TypedClauseGuard, TypedIfBranch, TypedPattern, TypedRecordUpdateArg, UnOp,
+        UntypedArg, UntypedClause, UntypedClauseGuard, UntypedIfBranch, UntypedPattern,
+        UntypedRecordUpdateArg,
+    },
+    builtins::{
+        bool, byte_array, function, g1_element, g2_element, int, list, string, tuple, void,
+    },
+    expr::{FnStyle, TypedExpr, UntypedExpr},
+    format,
+    line_numbers::LineNumbers,
+    tipo::{fields::FieldMap, PatternConstructor, TypeVar},
+};
+use std::{cmp::Ordering, collections::HashMap, ops::Deref, rc::Rc};
+use vec1::Vec1;
 
 #[derive(Debug)]
 pub(crate) struct ExprTyper<'a, 'b> {
+    pub(crate) lines: &'a LineNumbers,
+
     pub(crate) environment: &'a mut Environment<'b>,
 
     // We tweak the tracing behavior during type-check. Traces are either kept or left out of the
@@ -143,7 +147,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         expected_args: &[Rc<Type>],
         body: UntypedExpr,
         return_annotation: &Option<Annotation>,
-    ) -> Result<(Vec<TypedArg>, TypedExpr), Error> {
+    ) -> Result<(Vec<TypedArg>, TypedExpr, Rc<Type>), Error> {
         // Construct an initial type for each argument of the function- either an unbound
         // type variable or a type provided by an annotation.
 
@@ -421,24 +425,36 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             },
         };
 
-        let text = TypedExpr::String {
-            location,
-            tipo: string(),
-            value: format!(
-                "{} ? False",
-                format::Formatter::new()
-                    .expr(&value, false)
-                    .to_pretty_string(999)
-            ),
+        let text = match self.tracing.trace_level(false) {
+            TraceLevel::Verbose => Some(TypedExpr::String {
+                location,
+                tipo: string(),
+                value: format!(
+                    "{} ? False",
+                    format::Formatter::new()
+                        .expr(&value, false)
+                        .to_pretty_string(999)
+                ),
+            }),
+            TraceLevel::Compact => Some(TypedExpr::String {
+                location,
+                tipo: string(),
+                value: self
+                    .lines
+                    .line_and_column_number(location.start)
+                    .expect("Spans are within bounds.")
+                    .to_string(),
+            }),
+            TraceLevel::Silent => None,
         };
 
         let typed_value = self.infer(value)?;
 
         self.unify(bool(), typed_value.tipo(), typed_value.location(), false)?;
 
-        match self.tracing {
-            Tracing::NoTraces => Ok(typed_value),
-            Tracing::KeepTraces => Ok(TypedExpr::If {
+        match self.tracing.trace_level(false) {
+            TraceLevel::Silent => Ok(typed_value),
+            TraceLevel::Verbose | TraceLevel::Compact => Ok(TypedExpr::If {
                 location,
                 branches: vec1::vec1![IfBranch {
                     condition: typed_value,
@@ -448,7 +464,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 final_else: Box::new(TypedExpr::Trace {
                     location,
                     tipo: bool(),
-                    text: Box::new(text),
+                    text: Box::new(text.expect("TraceLevel::Silent excluded from pattern-guard")),
                     then: Box::new(var_false),
                 }),
                 tipo: bool(),
@@ -578,7 +594,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             _ => {
                 return Err(Error::RecordUpdateInvalidConstructor {
                     location: constructor.location(),
-                })
+                });
             }
         };
 
@@ -959,7 +975,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             )?
         };
 
-        // Do not perform exhaustiveness checking if user explicitly used `assert`.
+        // If `expect` is explicitly used, we still check exhaustiveness but instead of returning an
+        // error we emit a warning which explains that using `expect` is unnecessary.
         match kind {
             AssignmentKind::Let => {
                 self.environment
@@ -1119,7 +1136,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     }
 
                     ValueConstructorVariant::ModuleConstant { literal, .. } => {
-                        return Ok(ClauseGuard::Constant(literal.clone()))
+                        return Ok(ClauseGuard::Constant(literal.clone()));
                     }
                 };
 
@@ -1414,11 +1431,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
         let tipo = body.tipo();
 
-        let mut typed_branches = Vec1::new(TypedIfBranch {
+        let mut typed_branches = vec1::vec1![TypedIfBranch {
             body,
             condition,
             location: first.location,
-        });
+        }];
 
         for branch in &branches[1..] {
             let condition = self.infer(branch.condition.clone())?;
@@ -1474,11 +1491,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         return_annotation: Option<Annotation>,
         location: Span,
     ) -> Result<TypedExpr, Error> {
-        let (args, body) = self.do_infer_fn(args, expected_args, body, &return_annotation)?;
+        let (args, body, return_type) =
+            self.do_infer_fn(args, expected_args, body, &return_annotation)?;
 
         let args_types = args.iter().map(|a| a.tipo.clone()).collect();
 
-        let tipo = function(args_types, body.tipo());
+        let tipo = function(args_types, return_type);
 
         Ok(TypedExpr::Fn {
             location,
@@ -1495,7 +1513,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         args: Vec<TypedArg>,
         body: UntypedExpr,
         return_type: Option<Rc<Type>>,
-    ) -> Result<(Vec<TypedArg>, TypedExpr), Error> {
+    ) -> Result<(Vec<TypedArg>, TypedExpr, Rc<Type>), Error> {
         assert_no_assignment(&body)?;
 
         let (body_rigid_names, body_infer) = self.in_new_scope(|body_typer| {
@@ -1541,20 +1559,28 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let body = body_infer.map_err(|e| e.with_unify_error_rigid_names(&body_rigid_names))?;
 
         // Check that any return type is accurate.
-        if let Some(return_type) = return_type {
-            self.unify(
-                return_type.clone(),
-                body.tipo(),
-                body.type_defining_location(),
-                return_type.is_data(),
-            )
-            .map_err(|e| {
-                e.return_annotation_mismatch()
-                    .with_unify_error_rigid_names(&body_rigid_names)
-            })?;
-        }
+        let return_type = match return_type {
+            Some(return_type) => {
+                self.unify(
+                    return_type.clone(),
+                    body.tipo(),
+                    body.type_defining_location(),
+                    return_type.is_data(),
+                )
+                .map_err(|e| {
+                    e.return_annotation_mismatch()
+                        .with_unify_error_rigid_names(&body_rigid_names)
+                })?;
 
-        Ok((args, body))
+                Type::with_alias(body.tipo(), return_type.alias())
+            }
+            None => body.tipo(),
+        };
+
+        // Ensure elements are serialisable to Data.
+        ensure_serialisable(true, return_type.clone(), body.type_defining_location())?;
+
+        Ok((args, body, return_type))
     }
 
     fn infer_uint(&mut self, value: String, location: Span) -> TypedExpr {
@@ -1583,6 +1609,9 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
             elems.push(element)
         }
+
+        // Ensure elements are serialisable to Data.
+        ensure_serialisable(false, tipo.clone(), location)?;
 
         // Type check the ..tail, if there is one
         let tipo = list(tipo);
@@ -1635,6 +1664,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let mut typed_expressions = vec![];
 
         for expression in expressions {
+            assert_no_assignment(&expression)?;
+
             let typed_expression = self.infer(expression)?;
 
             self.unify(
@@ -1683,20 +1714,25 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             let mut expressions = Vec::with_capacity(count);
 
             for (i, expression) in untyped.into_iter().enumerate() {
-                match i.cmp(&(count - 1)) {
+                let no_assignment = assert_no_assignment(&expression);
+
+                let typed_expression = scope.infer(expression)?;
+
+                expressions.push(match i.cmp(&(count - 1)) {
                     // When the expression is the last in a sequence, we enforce it is NOT
                     // an assignment (kind of treat assignments like statements).
-                    Ordering::Equal => assert_no_assignment(&expression)?,
+                    Ordering::Equal => {
+                        no_assignment?;
+                        typed_expression
+                    }
 
                     // This isn't the final expression in the sequence, so it *must*
                     // be a let-binding; we do not allow anything else.
-                    Ordering::Less => assert_assignment(&expression)?,
+                    Ordering::Less => assert_assignment(typed_expression)?,
 
                     // Can't actually happen
-                    Ordering::Greater => (),
-                }
-
-                expressions.push(scope.infer(expression)?);
+                    Ordering::Greater => typed_expression,
+                })
             }
 
             Ok(expressions)
@@ -1743,6 +1779,9 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
         for elem in elems {
             let typed_elem = self.infer(elem)?;
+
+            // Ensure elements are serialisable to Data.
+            ensure_serialisable(false, typed_elem.tipo(), location)?;
 
             typed_elems.push(typed_elem);
         }
@@ -1817,9 +1856,23 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             })
         }
 
-        match self.tracing {
-            Tracing::NoTraces => Ok(then),
-            Tracing::KeepTraces => Ok(TypedExpr::Trace {
+        match self.tracing.trace_level(false) {
+            TraceLevel::Silent => Ok(then),
+            TraceLevel::Compact => Ok(TypedExpr::Trace {
+                location,
+                tipo,
+                then: Box::new(then),
+                text: Box::new(TypedExpr::String {
+                    location,
+                    tipo: string(),
+                    value: self
+                        .lines
+                        .line_and_column_number(location.start)
+                        .expect("Spans are within bounds.")
+                        .to_string(),
+                }),
+            }),
+            TraceLevel::Verbose => Ok(TypedExpr::Trace {
                 location,
                 tipo,
                 then: Box::new(then),
@@ -1828,7 +1881,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
-    fn infer_value_constructor(
+    pub fn infer_value_constructor(
         &mut self,
         module: &Option<String>,
         name: &str,
@@ -1930,8 +1983,10 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
     ) -> Result<TypedExpr, Error> {
         // if there is only one clause we want to present a warning
         // that suggests that a `let` binding should be used instead.
-        if clauses.len() == 1 {
-            self.environment.warnings.push(Warning::SingleWhenClause {
+        let mut sample = None;
+
+        if clauses.len() == 1 && clauses[0].patterns.len() == 1 {
+            sample = Some(Warning::SingleWhenClause {
                 location: clauses[0].patterns[0].location(),
                 sample: UntypedExpr::Assignment {
                     location: Span::empty(),
@@ -1964,6 +2019,10 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
         self.check_when_exhaustiveness(&typed_clauses, location)?;
 
+        if let Some(sample) = sample {
+            self.environment.warnings.push(sample);
+        }
+
         Ok(TypedExpr::When {
             location,
             tipo: return_type,
@@ -1976,12 +2035,17 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         self.environment.instantiate(t, ids, &self.hydrator)
     }
 
-    pub fn new(environment: &'a mut Environment<'b>, tracing: Tracing) -> Self {
+    pub fn new(
+        environment: &'a mut Environment<'b>,
+        lines: &'a LineNumbers,
+        tracing: Tracing,
+    ) -> Self {
         Self {
             hydrator: Hydrator::new(),
             environment,
             tracing,
             ungeneralised_function_used: false,
+            lines,
         }
     }
 
@@ -2035,12 +2099,84 @@ fn assert_no_assignment(expr: &UntypedExpr) -> Result<(), Error> {
         | UntypedExpr::CurvePoint { .. } => Ok(()),
     }
 }
-fn assert_assignment(expr: &UntypedExpr) -> Result<(), Error> {
-    if !matches!(*expr, UntypedExpr::Assignment { .. }) {
+
+fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
+    if !matches!(expr, TypedExpr::Assignment { .. }) {
+        if expr.tipo().is_void() {
+            return Ok(TypedExpr::Assignment {
+                location: expr.location(),
+                tipo: void(),
+                value: expr.clone().into(),
+                pattern: Pattern::Constructor {
+                    is_record: false,
+                    location: expr.location(),
+                    name: "Void".to_string(),
+                    constructor: PatternConstructor::Record {
+                        name: "Void".to_string(),
+                        field_map: None,
+                    },
+                    arguments: vec![],
+                    module: None,
+                    with_spread: false,
+                    tipo: void(),
+                },
+                kind: AssignmentKind::Let,
+            });
+        }
+
         return Err(Error::ImplicitlyDiscardedExpression {
             location: expr.location(),
         });
     }
 
-    Ok(())
+    Ok(expr)
+}
+
+pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Result<(), Error> {
+    match t.deref() {
+        Type::App { args, .. } => {
+            if t.is_ml_result() {
+                return Err(Error::IllegalTypeInData {
+                    tipo: t.clone(),
+                    location,
+                });
+            }
+
+            args.iter()
+                .map(|e| ensure_serialisable(false, e.clone(), location))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(())
+        }
+
+        Type::Tuple { elems, .. } => {
+            elems
+                .iter()
+                .map(|e| ensure_serialisable(false, e.clone(), location))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(())
+        }
+
+        Type::Fn { args, ret, .. } => {
+            if !allow_fn {
+                return Err(Error::IllegalTypeInData {
+                    tipo: t.clone(),
+                    location,
+                });
+            }
+
+            args.iter()
+                .map(|e| ensure_serialisable(allow_fn, e.clone(), location))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            ensure_serialisable(allow_fn, ret.clone(), location)
+        }
+
+        Type::Var { tipo, .. } => match tipo.borrow().deref() {
+            TypeVar::Unbound { .. } => Ok(()),
+            TypeVar::Generic { .. } => Ok(()),
+            TypeVar::Link { tipo } => ensure_serialisable(allow_fn, tipo.clone(), location),
+        },
+    }
 }

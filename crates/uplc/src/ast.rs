@@ -7,15 +7,18 @@ use crate::{
         eval_result::EvalResult,
         Machine,
     },
+    optimize::interner::CodeGenInterner,
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use pallas_addresses::{Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart};
-use pallas_primitives::{
-    alonzo::{self as pallas, Constr, PlutusData},
-    babbage::{self as cardano, Language},
+use pallas::ledger::{
+    addresses::{Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
+    primitives::{
+        alonzo::{self, Constr, PlutusData},
+        babbage::{self, Language},
+    },
+    traverse::ComputeHash,
 };
-use pallas_traverse::ComputeHash;
 use serde::{
     self,
     de::{self, Deserialize, Deserializer, MapAccess, Visitor},
@@ -55,21 +58,8 @@ where
         }
     }
 
-    /// We use this to apply the validator to Datum,
-    /// then redeemer, then ScriptContext. If datum is
-    /// even necessary (i.e. minting policy).
-    pub fn apply_term(&self, term: &Term<T>) -> Self {
-        let applied_term = Term::Apply {
-            function: Rc::new(self.term.clone()),
-            argument: Rc::new(term.clone()),
-        };
-
-        Program {
-            version: self.version,
-            term: applied_term,
-        }
-    }
-
+    /// A convenient and faster version that `apply_term` since the program doesn't need to be
+    /// re-interned (constant Data do not introduce new bindings).
     pub fn apply_data(&self, plutus_data: PlutusData) -> Self {
         let applied_term = Term::Apply {
             function: Rc::new(self.term.clone()),
@@ -80,6 +70,27 @@ where
             version: self.version,
             term: applied_term,
         }
+    }
+}
+
+impl Program<Name> {
+    /// We use this to apply the validator to Datum,
+    /// then redeemer, then ScriptContext. If datum is
+    /// even necessary (i.e. minting policy).
+    pub fn apply_term(&self, term: &Term<Name>) -> Self {
+        let applied_term = Term::Apply {
+            function: Rc::new(self.term.clone()),
+            argument: Rc::new(term.clone()),
+        };
+
+        let mut program = Program {
+            version: self.version,
+            term: applied_term,
+        };
+
+        CodeGenInterner::new().program(&mut program);
+
+        program
     }
 }
 
@@ -97,7 +108,7 @@ impl Serialize for Program<DeBruijn> {
         let cbor = self.to_cbor().unwrap();
         let mut s = serializer.serialize_struct("Program<DeBruijn>", 2)?;
         s.serialize_field("compiledCode", &hex::encode(&cbor))?;
-        s.serialize_field("hash", &cardano::PlutusV2Script(cbor.into()).compute_hash())?;
+        s.serialize_field("hash", &babbage::PlutusV2Script(cbor.into()).compute_hash())?;
         s.end()
     }
 }
@@ -158,7 +169,9 @@ impl<'a> Deserialize<'a> for Program<DeBruijn> {
 impl Program<DeBruijn> {
     pub fn address(&self, network: Network, delegation: ShelleyDelegationPart) -> ShelleyAddress {
         let cbor = self.to_cbor().unwrap();
-        let validator_hash = cardano::PlutusV2Script(cbor.into()).compute_hash();
+
+        let validator_hash = babbage::PlutusV2Script(cbor.into()).compute_hash();
+
         ShelleyAddress::new(
             network,
             ShelleyPaymentPart::Script(validator_hash),
@@ -266,27 +279,27 @@ pub enum Constant {
     Bls12_381MlResult(Box<blst::blst_fp12>),
 }
 
-pub struct Data {}
+pub struct Data;
 
 // TODO: See about moving these builders upstream to Pallas?
 impl Data {
     pub fn to_hex(data: PlutusData) -> String {
         let mut bytes = Vec::new();
-        pallas_codec::minicbor::Encoder::new(&mut bytes)
+        pallas::codec::minicbor::Encoder::new(&mut bytes)
             .encode(data)
             .expect("failed to encode Plutus Data as cbor?");
         hex::encode(bytes)
     }
     pub fn integer(i: BigInt) -> PlutusData {
-        match i.to_i64() {
-            Some(i) => PlutusData::BigInt(pallas::BigInt::Int(i.into())),
-            None => {
+        match i.to_i128().map(|n| n.try_into()) {
+            Some(Ok(i)) => PlutusData::BigInt(alonzo::BigInt::Int(i)),
+            _ => {
                 let (sign, bytes) = i.to_bytes_be();
                 match sign {
                     num_bigint::Sign::Minus => {
-                        PlutusData::BigInt(pallas::BigInt::BigNInt(bytes.into()))
+                        PlutusData::BigInt(alonzo::BigInt::BigNInt(bytes.into()))
                     }
-                    _ => PlutusData::BigInt(pallas::BigInt::BigUInt(bytes.into())),
+                    _ => PlutusData::BigInt(alonzo::BigInt::BigUInt(bytes.into())),
                 }
             }
         }

@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Hash, Eq, Copy)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Base {
     Decimal { numeric_underscore: bool },
     Hexadecimal,
@@ -89,6 +89,7 @@ pub enum Token {
     When,
     Trace,
     Validator,
+    Via,
 }
 
 impl fmt::Display for Token {
@@ -176,6 +177,7 @@ impl fmt::Display for Token {
             Token::Test => "test",
             Token::Fail => "fail",
             Token::Validator => "validator",
+            Token::Via => "via",
         };
         write!(f, "\"{s}\"")
     }

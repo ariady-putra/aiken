@@ -3,15 +3,21 @@ use crate::{
     machine::cost_model::ExBudget,
     PlutusData,
 };
-use pallas_addresses::{Address, ScriptHash, StakePayload};
-use pallas_codec::utils::{KeyValuePairs, MaybeIndefArray};
-use pallas_crypto::hash::Hash;
-use pallas_primitives::babbage::{
-    Certificate, CostMdls, DatumHash, DatumOption, ExUnits, Language, Mint, MintedTx, NativeScript,
-    PlutusV1Script, PlutusV2Script, PolicyId, Redeemer, RedeemerTag, RewardAccount, Script,
-    StakeCredential, TransactionInput, TransactionOutput, Value, Withdrawals,
+use pallas::{
+    codec::utils::{KeyValuePairs, MaybeIndefArray},
+    crypto::hash::Hash,
+    ledger::{
+        addresses::{Address, ScriptHash, StakePayload},
+        primitives::babbage::{
+            Certificate, CostMdls, DatumHash, DatumOption, ExUnits, Language, Mint, MintedTx,
+            NativeScript, PlutusV1Script, PlutusV2Script, PolicyId, PseudoScript, Redeemer,
+            RedeemerTag, RewardAccount, StakeCredential, TransactionInput, TransactionOutput,
+            Value, Withdrawals,
+        },
+        traverse::{ComputeHash, OriginalHash},
+    },
 };
-use pallas_traverse::{ComputeHash, OriginalHash};
+
 use std::{cmp::Ordering, collections::HashMap, convert::TryInto, ops::Deref, vec};
 
 use super::{
@@ -666,7 +672,10 @@ pub fn get_script_and_datum_lookup_table(
     }
 
     for script in scripts_native_witnesses.iter() {
-        scripts.insert(script.compute_hash(), ScriptVersion::Native(script.clone()));
+        scripts.insert(
+            script.compute_hash(),
+            ScriptVersion::Native(script.clone().unwrap()),
+        );
     }
 
     for script in scripts_v1_witnesses.iter() {
@@ -685,13 +694,13 @@ pub fn get_script_and_datum_lookup_table(
             TransactionOutput::PostAlonzo(output) => {
                 if let Some(script) = &output.script_ref {
                     match &script.0 {
-                        Script::NativeScript(ns) => {
+                        PseudoScript::NativeScript(ns) => {
                             scripts.insert(ns.compute_hash(), ScriptVersion::Native(ns.clone()));
                         }
-                        Script::PlutusV1Script(v1) => {
+                        PseudoScript::PlutusV1Script(v1) => {
                             scripts.insert(v1.compute_hash(), ScriptVersion::V1(v1.clone()));
                         }
-                        Script::PlutusV2Script(v2) => {
+                        PseudoScript::PlutusV2Script(v2) => {
                             scripts.insert(v2.compute_hash(), ScriptVersion::V2(v2.clone()));
                         }
                     }

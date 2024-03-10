@@ -1,11 +1,14 @@
-use std::{collections::VecDeque, fmt::Debug, rc::Rc};
-
-use pallas_codec::flat::{
-    de::{self, Decode, Decoder},
-    en::{self, Encode, Encoder},
-    Flat,
+use num_bigint::BigInt;
+use pallas::{
+    codec::flat::{
+        de::{self, Decode, Decoder},
+        en::{self, Encode, Encoder},
+        Flat,
+    },
+    ledger::primitives::{babbage::PlutusData, Fragment},
 };
-use pallas_primitives::{babbage::PlutusData, Fragment};
+
+use std::{collections::VecDeque, fmt::Debug, rc::Rc};
 
 use crate::{
     ast::{
@@ -32,7 +35,7 @@ where
     T: Binder<'b> + Debug,
 {
     pub fn from_cbor(bytes: &'b [u8], buffer: &'b mut Vec<u8>) -> Result<Self, de::Error> {
-        let mut cbor_decoder = pallas_codec::minicbor::Decoder::new(bytes);
+        let mut cbor_decoder = pallas::codec::minicbor::Decoder::new(bytes);
 
         let flat_bytes = cbor_decoder
             .bytes()
@@ -64,7 +67,7 @@ where
 
         let mut bytes = Vec::new();
 
-        let mut cbor_encoder = pallas_codec::minicbor::Encoder::new(&mut bytes);
+        let mut cbor_encoder = pallas::codec::minicbor::Encoder::new(&mut bytes);
 
         cbor_encoder
             .bytes(&flat_bytes)
@@ -444,9 +447,6 @@ impl Encode for Constant {
         match self {
             Constant::Integer(i) => {
                 encode_constant(&[0], e)?;
-
-                let i: i128 = i.try_into().unwrap();
-
                 i.encode(e)?;
             }
 
@@ -521,11 +521,7 @@ impl Encode for Constant {
 
 fn encode_constant_value(x: &Constant, e: &mut Encoder) -> Result<(), en::Error> {
     match x {
-        Constant::Integer(x) => {
-            let x: i128 = x.try_into().unwrap();
-
-            x.encode(e)
-        }
+        Constant::Integer(x) => x.encode(e),
         Constant::ByteString(b) => b.encode(e),
         Constant::String(s) => s.encode(e),
         Constant::Unit => Ok(()),
@@ -588,7 +584,7 @@ fn encode_type(typ: &Type, bytes: &mut Vec<u8>) {
 impl<'b> Decode<'b> for Constant {
     fn decode(d: &mut Decoder) -> Result<Self, de::Error> {
         match &decode_constant(d)?[..] {
-            [0] => Ok(Constant::Integer(i128::decode(d)?.into())),
+            [0] => Ok(Constant::Integer(BigInt::decode(d)?)),
             [1] => Ok(Constant::ByteString(Vec::<u8>::decode(d)?)),
             [2] => Ok(Constant::String(String::decode(d)?)),
             [3] => Ok(Constant::Unit),
@@ -653,7 +649,7 @@ impl<'b> Decode<'b> for Constant {
 
 fn decode_constant_value(typ: Rc<Type>, d: &mut Decoder) -> Result<Constant, de::Error> {
     match typ.as_ref() {
-        Type::Integer => Ok(Constant::Integer(i128::decode(d)?.into())),
+        Type::Integer => Ok(Constant::Integer(BigInt::decode(d)?)),
         Type::ByteString => Ok(Constant::ByteString(Vec::<u8>::decode(d)?)),
         Type::String => Ok(Constant::String(String::decode(d)?)),
         Type::Unit => Ok(Constant::Unit),
@@ -951,7 +947,7 @@ mod tests {
         parser,
     };
     use indoc::indoc;
-    use pallas_codec::flat::Flat;
+    use pallas::codec::flat::Flat;
 
     #[test]
     fn flat_encode_integer() {

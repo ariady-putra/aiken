@@ -31,7 +31,7 @@ pub fn exec(
 ) -> miette::Result<()> {
     with_project(directory.as_deref(), false, |p| {
         if rebuild {
-            p.build(false, Tracing::NoTraces)?;
+            p.build(false, Tracing::silent())?;
         }
 
         let title = module.as_ref().map(|m| {
@@ -46,7 +46,7 @@ pub fn exec(
 
         let title = title.as_ref().or(validator.as_ref());
 
-        let address = p.address(title, None)?;
+        let address = p.address(title, None, false)?;
 
         println!("{}", address.payment().to_hex());
 

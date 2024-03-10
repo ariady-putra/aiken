@@ -5,16 +5,16 @@ use super::{
     schema::{Annotated, Schema},
 };
 use crate::module::{CheckedModule, CheckedModules};
-use std::rc::Rc;
-
 use aiken_lang::{
-    ast::{TypedArg, TypedFunction, TypedValidator},
+    ast::{Annotation, TypedArg, TypedFunction, TypedValidator},
     gen_uplc::CodeGenerator,
+    tipo::Type,
 };
 use miette::NamedSource;
 use serde;
+use std::borrow::Borrow;
 use uplc::{
-    ast::{Constant, DeBruijn, Program, Term},
+    ast::{Constant, DeBruijn, Program},
     PlutusData,
 };
 
@@ -49,7 +49,7 @@ impl Validator {
         module: &CheckedModule,
         def: &TypedValidator,
     ) -> Vec<Result<Validator, Error>> {
-        let program = generator.generate(def).try_into().unwrap();
+        let program = generator.generate(def, &module.name).try_into().unwrap();
 
         let is_multi_validator = def.other_fun.is_some();
 
@@ -96,19 +96,23 @@ impl Validator {
         let parameters = params
             .iter()
             .map(|param| {
-                Annotated::from_type(modules.into(), &param.tipo, &mut definitions)
-                    .map(|schema| Parameter {
-                        title: Some(param.arg_name.get_label()),
-                        schema,
-                    })
-                    .map_err(|error| Error::Schema {
-                        error,
-                        location: param.location,
-                        source_code: NamedSource::new(
-                            module.input_path.display().to_string(),
-                            module.code.clone(),
-                        ),
-                    })
+                Annotated::from_type(
+                    modules.into(),
+                    tipo_or_annotation(module, param),
+                    &mut definitions,
+                )
+                .map(|schema| Parameter {
+                    title: Some(param.arg_name.get_label()),
+                    schema,
+                })
+                .map_err(|error| Error::Schema {
+                    error,
+                    location: param.location,
+                    source_code: NamedSource::new(
+                        module.input_path.display().to_string(),
+                        module.code.clone(),
+                    ),
+                })
             })
             .collect::<Result<_, _>>()?;
 
@@ -118,45 +122,75 @@ impl Validator {
             parameters,
             datum: datum
                 .map(|datum| {
-                    Annotated::from_type(modules.into(), &datum.tipo, &mut definitions).map_err(
-                        |error| Error::Schema {
-                            error,
-                            location: datum.location,
-                            source_code: NamedSource::new(
-                                module.input_path.display().to_string(),
-                                module.code.clone(),
-                            ),
-                        },
+                    Annotated::from_type(
+                        modules.into(),
+                        tipo_or_annotation(module, datum),
+                        &mut definitions,
                     )
+                    .map_err(|error| Error::Schema {
+                        error,
+                        location: datum.location,
+                        source_code: NamedSource::new(
+                            module.input_path.display().to_string(),
+                            module.code.clone(),
+                        ),
+                    })
                 })
                 .transpose()?
                 .map(|schema| Parameter {
                     title: datum.map(|datum| datum.arg_name.get_label()),
                     schema,
                 }),
-            redeemer: Annotated::from_type(modules.into(), &redeemer.tipo, &mut definitions)
-                .map_err(|error| Error::Schema {
-                    error,
-                    location: redeemer.location,
-                    source_code: NamedSource::new(
-                        module.input_path.display().to_string(),
-                        module.code.clone(),
+            redeemer: Annotated::from_type(
+                modules.into(),
+                tipo_or_annotation(module, redeemer),
+                &mut definitions,
+            )
+            .map_err(|error| Error::Schema {
+                error,
+                location: redeemer.location,
+                source_code: NamedSource::new(
+                    module.input_path.display().to_string(),
+                    module.code.clone(),
+                ),
+            })
+            .map(|schema| Parameter {
+                title: Some(redeemer.arg_name.get_label()),
+                schema: match datum {
+                    Some(..) if is_multi_validator => Annotated::as_wrapped_redeemer(
+                        &mut definitions,
+                        schema,
+                        redeemer.tipo.clone(),
                     ),
-                })
-                .map(|schema| Parameter {
-                    title: Some(redeemer.arg_name.get_label()),
-                    schema: match datum {
-                        Some(..) if is_multi_validator => Annotated::as_wrapped_redeemer(
-                            &mut definitions,
-                            schema,
-                            redeemer.tipo.clone(),
-                        ),
-                        _ => schema,
-                    },
-                })?,
+                    _ => schema,
+                },
+            })?,
             program: program.clone(),
             definitions,
         })
+    }
+}
+
+fn tipo_or_annotation<'a>(module: &'a CheckedModule, arg: &'a TypedArg) -> &'a Type {
+    match *arg.tipo.borrow() {
+        Type::App {
+            module: ref module_name,
+            name: ref type_name,
+            ..
+        } if module_name.is_empty() && &type_name[..] == "Data" => match arg.annotation {
+            Some(Annotation::Constructor { ref arguments, .. }) if !arguments.is_empty() => module
+                .ast
+                .type_info
+                .annotations
+                .get(
+                    arguments
+                        .first()
+                        .expect("guard ensures at least one element"),
+                )
+                .unwrap_or(&arg.tipo),
+            _ => &arg.tipo,
+        },
+        _ => &arg.tipo,
     }
 }
 
@@ -164,14 +198,14 @@ impl Validator {
     pub fn apply(
         self,
         definitions: &Definitions<Annotated<Schema>>,
-        arg: &Term<DeBruijn>,
+        arg: &PlutusData,
     ) -> Result<Self, Error> {
         match self.parameters.split_first() {
             None => Err(Error::NoParametersToApply),
             Some((head, tail)) => {
-                head.validate(definitions, arg)?;
+                head.validate(definitions, &Constant::Data(arg.clone()))?;
                 Ok(Self {
-                    program: self.program.apply_term(arg),
+                    program: self.program.apply_data(arg.clone()),
                     parameters: tail.to_vec(),
                     ..self
                 })
@@ -183,7 +217,7 @@ impl Validator {
         &self,
         definitions: &Definitions<Annotated<Schema>>,
         ask: F,
-    ) -> Result<Term<DeBruijn>, Error>
+    ) -> Result<PlutusData, Error>
     where
         F: Fn(&Annotated<Schema>, &Definitions<Annotated<Schema>>) -> Result<PlutusData, Error>,
     {
@@ -207,7 +241,7 @@ impl Validator {
 
                 let data = ask(&schema, definitions)?;
 
-                Ok(Term::Constant(Rc::new(Constant::Data(data.clone()))))
+                Ok(data.clone())
             }
         }
     }
@@ -215,13 +249,6 @@ impl Validator {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use aiken_lang::{self, builtins};
-    use uplc::ast as uplc_ast;
-
-    use crate::tests::TestProject;
-
     use super::{
         super::{
             definitions::{Definitions, Reference},
@@ -230,17 +257,23 @@ mod tests {
         },
         *,
     };
+    use crate::tests::TestProject;
+    use aiken_lang::{
+        self,
+        ast::{TraceLevel, Tracing},
+        builtins,
+    };
+    use std::collections::HashMap;
+    use uplc::ast as uplc_ast;
 
     macro_rules! assert_validator {
         ($code:expr) => {
             let mut project = TestProject::new();
 
             let modules = CheckedModules::singleton(project.check(project.parse(indoc::indoc! { $code })));
-            let mut generator = modules.new_generator(
-                &project.functions,
-                &project.data_types,
-                &project.module_types,
-                true,
+
+            let mut generator = project.new_generator(
+                Tracing::All(TraceLevel::Verbose),
             );
 
             let (validator, def) = modules
@@ -257,15 +290,23 @@ mod tests {
             let validator = validators
                 .get(0)
                 .unwrap()
-                .as_ref()
-                .expect("Failed to create validator blueprint");
+                .as_ref();
 
-            insta::with_settings!({
-                description => concat!("Code:\n\n", indoc::indoc! { $code }),
-                omit_expression => true
-            }, {
-                insta::assert_json_snapshot!(validator);
-            });
+            match validator {
+                Err(e) => insta::with_settings!({
+                    description => concat!("Code:\n\n", indoc::indoc! { $code }),
+                    omit_expression => true
+                }, {
+                    insta::assert_debug_snapshot!(e);
+                }),
+
+                Ok(validator) => insta::with_settings!({
+                    description => concat!("Code:\n\n", indoc::indoc! { $code }),
+                    omit_expression => true
+                }, {
+                    insta::assert_json_snapshot!(validator);
+                }),
+            };
         };
     }
 
@@ -476,6 +517,24 @@ mod tests {
     }
 
     #[test]
+    fn opaque_singleton_multi_variants() {
+        assert_validator!(
+            r#"
+            pub opaque type Rational {
+              numerator: Int,
+              denominator: Int,
+            }
+
+            validator {
+              fn opaque_singleton_multi_variants(redeemer: Rational, ctx: Void) {
+                True
+              }
+            }
+            "#
+        );
+    }
+
+    #[test]
     fn nested_data() {
         assert_validator!(
             r#"
@@ -540,10 +599,27 @@ mod tests {
     }
 
     #[test]
+    fn annotated_data() {
+        assert_validator!(
+            r#"
+            pub type Foo {
+                foo: Int
+            }
+
+            validator {
+                fn annotated_data(datum: Data<Foo>, redeemer: Data, ctx: Void) {
+                    True
+                }
+            }
+            "#
+        );
+    }
+
+    #[test]
     fn validate_arguments_integer() {
         let definitions = fixture_definitions();
 
-        let term = Term::data(uplc_ast::Data::integer(42.into()));
+        let term = Constant::Data(uplc_ast::Data::integer(42.into()));
 
         let param = Parameter {
             title: None,
@@ -557,7 +633,7 @@ mod tests {
     fn validate_arguments_bytestring() {
         let definitions = fixture_definitions();
 
-        let term = Term::data(uplc_ast::Data::bytestring(vec![102, 111, 111]));
+        let term = Constant::Data(uplc_ast::Data::bytestring(vec![102, 111, 111]));
 
         let param = Parameter {
             title: None,
@@ -586,7 +662,7 @@ mod tests {
             .into(),
         );
 
-        let term = Term::data(uplc_ast::Data::list(vec![
+        let term = Constant::Data(uplc_ast::Data::list(vec![
             uplc_ast::Data::integer(42.into()),
             uplc_ast::Data::integer(14.into()),
         ]));
@@ -615,7 +691,7 @@ mod tests {
             .into(),
         );
 
-        let term = Term::data(uplc_ast::Data::list(vec![uplc_ast::Data::bytestring(
+        let term = Constant::Data(uplc_ast::Data::list(vec![uplc_ast::Data::bytestring(
             vec![102, 111, 111],
         )]));
 
@@ -647,7 +723,7 @@ mod tests {
             .into(),
         );
 
-        let term = Term::data(uplc_ast::Data::list(vec![
+        let term = Constant::Data(uplc_ast::Data::list(vec![
             uplc_ast::Data::integer(42.into()),
             uplc_ast::Data::bytestring(vec![102, 111, 111]),
         ]));
@@ -678,7 +754,7 @@ mod tests {
             .into(),
         );
 
-        let term = Term::data(uplc_ast::Data::map(vec![(
+        let term = Constant::Data(uplc_ast::Data::map(vec![(
             uplc_ast::Data::bytestring(vec![102, 111, 111]),
             uplc_ast::Data::integer(42.into()),
         )]));
@@ -694,7 +770,7 @@ mod tests {
 
         let definitions = fixture_definitions();
 
-        let term = Term::data(uplc_ast::Data::constr(1, vec![]));
+        let term = Constant::Data(uplc_ast::Data::constr(1, vec![]));
 
         let param: Parameter = schema.into();
 
@@ -729,7 +805,7 @@ mod tests {
             .into(),
         );
 
-        let term = Term::data(uplc_ast::Data::constr(
+        let term = Constant::Data(uplc_ast::Data::constr(
             0,
             vec![uplc_ast::Data::constr(0, vec![])],
         ));
@@ -785,7 +861,7 @@ mod tests {
             .into(),
         );
 
-        let term = Term::data(uplc_ast::Data::constr(
+        let term = Constant::Data(uplc_ast::Data::constr(
             1,
             vec![
                 uplc_ast::Data::integer(14.into()),

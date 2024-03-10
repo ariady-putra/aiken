@@ -1,9 +1,11 @@
 use crate::{
     builtins::{self, bool, g1_element, g2_element},
     expr::{TypedExpr, UntypedExpr},
+    line_numbers::LineNumbers,
     parser::token::{Base, Token},
     tipo::{PatternConstructor, Type, TypeInfo},
 };
+use indexmap::IndexMap;
 use miette::Diagnostic;
 use owo_colors::{OwoColorize, Stream::Stdout};
 use std::{
@@ -20,7 +22,7 @@ pub const PIPE_VARIABLE: &str = "_pipe";
 pub type TypedModule = Module<TypeInfo, TypedDefinition>;
 pub type UntypedModule = Module<(), UntypedDefinition>;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleKind {
     Lib,
     Validator,
@@ -36,12 +38,13 @@ impl ModuleKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Module<Info, Definitions> {
     pub name: String,
     pub docs: Vec<String>,
     pub type_info: Info,
     pub definitions: Vec<Definitions>,
+    pub lines: LineNumbers,
     pub kind: ModuleKind,
 }
 
@@ -125,6 +128,62 @@ impl TypedModule {
 
         Ok(())
     }
+
+    // TODO: Avoid cloning definitions here. This would likely require having a lifetime on
+    // 'Project', so that we can enforce that those references live from the ast to here.
+    pub fn register_definitions(
+        &self,
+        functions: &mut IndexMap<FunctionAccessKey, TypedFunction>,
+        data_types: &mut IndexMap<DataTypeKey, TypedDataType>,
+    ) {
+        for def in self.definitions() {
+            match def {
+                Definition::Fn(func) => {
+                    functions.insert(
+                        FunctionAccessKey {
+                            module_name: self.name.clone(),
+                            function_name: func.name.clone(),
+                        },
+                        func.clone(),
+                    );
+                }
+
+                Definition::Test(test) => {
+                    functions.insert(
+                        FunctionAccessKey {
+                            module_name: self.name.clone(),
+                            function_name: test.name.clone(),
+                        },
+                        test.clone().into(),
+                    );
+                }
+
+                Definition::DataType(dt) => {
+                    data_types.insert(
+                        DataTypeKey {
+                            module_name: self.name.clone(),
+                            defined_type: dt.name.clone(),
+                        },
+                        dt.clone(),
+                    );
+                }
+
+                Definition::Validator(v) => {
+                    let module_name = self.name.as_str();
+
+                    if let Some((k, v)) = v.into_function_definition(module_name, |f, _| Some(f)) {
+                        functions.insert(k, v);
+                    }
+
+                    if let Some((k, v)) = v.into_function_definition(module_name, |_, f| f) {
+                        functions.insert(k, v);
+                    }
+                }
+
+                Definition::TypeAlias(_) | Definition::ModuleConstant(_) | Definition::Use(_) => {}
+            }
+        }
+    }
 }
 
 fn str_to_keyword(word: &str) -> Option<Token> {
@@ -152,16 +211,20 @@ fn str_to_keyword(word: &str) -> Option<Token> {
         "and" => Some(Token::And),
         "or" => Some(Token::Or),
         "validator" => Some(Token::Validator),
+        "via" => Some(Token::Via),
         _ => None,
     }
 }
 
-pub type TypedFunction = Function<Rc<Type>, TypedExpr>;
-pub type UntypedFunction = Function<(), UntypedExpr>;
+pub type TypedFunction = Function<Rc<Type>, TypedExpr, TypedArg>;
+pub type UntypedFunction = Function<(), UntypedExpr, UntypedArg>;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Function<T, Expr> {
-    pub arguments: Vec<Arg<T>>,
+pub type TypedTest = Function<Rc<Type>, TypedExpr, TypedArgVia>;
+pub type UntypedTest = Function<(), UntypedExpr, UntypedArgVia>;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Function<T, Expr, Arg> {
+    pub arguments: Vec<Arg>,
     pub body: Expr,
     pub doc: Option<String>,
     pub location: Span,
@@ -176,53 +239,41 @@ pub struct Function<T, Expr> {
 pub type TypedTypeAlias = TypeAlias<Rc<Type>>;
 pub type UntypedTypeAlias = TypeAlias<()>;
 
-impl TypedFunction {
-    pub fn test_hint(&self) -> Option<(BinOp, Box<TypedExpr>, Box<TypedExpr>)> {
-        do_test_hint(&self.body)
-    }
-}
-
-pub fn do_test_hint(body: &TypedExpr) -> Option<(BinOp, Box<TypedExpr>, Box<TypedExpr>)> {
-    match body {
-        TypedExpr::BinOp {
-            name,
-            tipo,
-            left,
-            right,
-            ..
-        } if tipo == &bool() => Some((*name, left.clone(), right.clone())),
-        TypedExpr::Sequence { expressions, .. } | TypedExpr::Pipeline { expressions, .. } => {
-            if let Some((binop, left, right)) = do_test_hint(&expressions[expressions.len() - 1]) {
-                let mut new_left_expressions = expressions.clone();
-                new_left_expressions.pop();
-                new_left_expressions.push(*left);
-
-                let mut new_right_expressions = expressions.clone();
-                new_right_expressions.pop();
-                new_right_expressions.push(*right);
-
-                Some((
-                    binop,
-                    TypedExpr::Sequence {
-                        expressions: new_left_expressions,
-                        location: Span::empty(),
-                    }
-                    .into(),
-                    TypedExpr::Sequence {
-                        expressions: new_right_expressions,
-                        location: Span::empty(),
-                    }
-                    .into(),
-                ))
-            } else {
-                None
-            }
+impl From<UntypedTest> for UntypedFunction {
+    fn from(f: UntypedTest) -> Self {
+        Function {
+            doc: f.doc,
+            location: f.location,
+            name: f.name,
+            public: f.public,
+            arguments: f.arguments.into_iter().map(|arg| arg.into()).collect(),
+            return_annotation: f.return_annotation,
+            return_type: f.return_type,
+            body: f.body,
+            can_error: f.can_error,
+            end_position: f.end_position,
         }
-        _ => None,
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl From<TypedTest> for TypedFunction {
+    fn from(f: TypedTest) -> Self {
+        Function {
+            doc: f.doc,
+            location: f.location,
+            name: f.name,
+            public: f.public,
+            arguments: f.arguments.into_iter().map(|arg| arg.into()).collect(),
+            return_annotation: f.return_annotation,
+            return_type: f.return_type,
+            body: f.body,
+            can_error: f.can_error,
+            end_position: f.end_position,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeAlias<T> {
     pub alias: String,
     pub annotation: Annotation,
@@ -233,9 +284,90 @@ pub struct TypeAlias<T> {
     pub tipo: T,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DataTypeKey {
+    pub module_name: String,
+    pub defined_type: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct FunctionAccessKey {
+    pub module_name: String,
+    pub function_name: String,
+}
+
 pub type TypedDataType = DataType<Rc<Type>>;
 
 impl TypedDataType {
+    pub fn data() -> Self {
+        DataType {
+            constructors: vec![],
+            doc: None,
+            location: Span::empty(),
+            name: "Data".to_string(),
+            opaque: false,
+            parameters: vec![],
+            public: true,
+            typed_parameters: vec![],
+        }
+    }
+
+    pub fn bool() -> Self {
+        DataType {
+            constructors: vec![
+                RecordConstructor {
+                    location: Span::empty(),
+                    name: "False".to_string(),
+                    arguments: vec![],
+                    doc: None,
+                    sugar: false,
+                },
+                RecordConstructor {
+                    location: Span::empty(),
+                    name: "True".to_string(),
+                    arguments: vec![],
+                    doc: None,
+                    sugar: false,
+                },
+            ],
+            doc: None,
+            location: Span::empty(),
+            name: "Bool".to_string(),
+            opaque: false,
+            parameters: vec![],
+            public: true,
+            typed_parameters: vec![],
+        }
+    }
+
+    pub fn prng() -> Self {
+        DataType {
+            constructors: vec![
+                RecordConstructor {
+                    location: Span::empty(),
+                    name: "Seeded".to_string(),
+                    arguments: vec![],
+                    doc: None,
+                    sugar: false,
+                },
+                RecordConstructor {
+                    location: Span::empty(),
+                    name: "Replayed".to_string(),
+                    arguments: vec![],
+                    doc: None,
+                    sugar: false,
+                },
+            ],
+            doc: None,
+            location: Span::empty(),
+            name: "PRNG".to_string(),
+            opaque: false,
+            parameters: vec![],
+            public: true,
+            typed_parameters: vec![],
+        }
+    }
+
     pub fn ordering() -> Self {
         DataType {
             constructors: vec![
@@ -311,7 +443,7 @@ impl TypedDataType {
 
 pub type UntypedDataType = DataType<()>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DataType<T> {
     pub constructors: Vec<RecordConstructor<T>>,
     pub doc: Option<String>,
@@ -326,7 +458,7 @@ pub struct DataType<T> {
 pub type TypedUse = Use<String>;
 pub type UntypedUse = Use<()>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Use<PackageName> {
     pub as_name: Option<String>,
     pub location: Span,
@@ -338,7 +470,7 @@ pub struct Use<PackageName> {
 pub type TypedModuleConstant = ModuleConstant<Rc<Type>>;
 pub type UntypedModuleConstant = ModuleConstant<()>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleConstant<T> {
     pub doc: Option<String>,
     pub location: Span,
@@ -352,22 +484,55 @@ pub struct ModuleConstant<T> {
 pub type TypedValidator = Validator<Rc<Type>, TypedExpr>;
 pub type UntypedValidator = Validator<(), UntypedExpr>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Validator<T, Expr> {
     pub doc: Option<String>,
     pub end_position: usize,
-    pub fun: Function<T, Expr>,
-    pub other_fun: Option<Function<T, Expr>>,
+    pub fun: Function<T, Expr, Arg<T>>,
+    pub other_fun: Option<Function<T, Expr, Arg<T>>>,
     pub location: Span,
     pub params: Vec<Arg<T>>,
+}
+
+impl TypedValidator {
+    pub fn into_function_definition<'a, F>(
+        &'a self,
+        module_name: &str,
+        select: F,
+    ) -> Option<(FunctionAccessKey, TypedFunction)>
+    where
+        F: Fn(&'a TypedFunction, Option<&'a TypedFunction>) -> Option<&'a TypedFunction> + 'a,
+    {
+        match select(&self.fun, self.other_fun.as_ref()) {
+            None => None,
+            Some(fun) => {
+                let mut fun = fun.clone();
+
+                fun.arguments = self
+                    .params
+                    .clone()
+                    .into_iter()
+                    .chain(fun.arguments)
+                    .collect();
+
+                Some((
+                    FunctionAccessKey {
+                        module_name: module_name.to_string(),
+                        function_name: fun.name.clone(),
+                    },
+                    fun,
+                ))
+            }
+        }
+    }
 }
 
 pub type TypedDefinition = Definition<Rc<Type>, TypedExpr, String>;
 pub type UntypedDefinition = Definition<(), UntypedExpr, ()>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Definition<T, Expr, PackageName> {
-    Fn(Function<T, Expr>),
+    Fn(Function<T, Expr, Arg<T>>),
 
     TypeAlias(TypeAlias<T>),
 
@@ -377,7 +542,7 @@ pub enum Definition<T, Expr, PackageName> {
 
     ModuleConstant(ModuleConstant<T>),
 
-    Test(Function<T, Expr>),
+    Test(Function<T, Expr, ArgVia<T, Expr>>),
 
     Validator(Validator<T, Expr>),
 }
@@ -495,7 +660,7 @@ pub struct DefinitionLocation<'module> {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constant {
     Int {
         location: Span,
@@ -547,7 +712,7 @@ impl Constant {
 pub type TypedCallArg = CallArg<TypedExpr>;
 pub type ParsedCallArg = CallArg<Option<UntypedExpr>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CallArg<A> {
     pub label: Option<String>,
     pub location: Span,
@@ -569,7 +734,7 @@ impl TypedCallArg {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordConstructor<T> {
     pub location: Span,
     pub name: String,
@@ -584,7 +749,7 @@ impl<A> RecordConstructor<A> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordConstructorArg<T> {
     pub label: Option<String>,
     // ast
@@ -603,7 +768,7 @@ impl<T: PartialEq> RecordConstructorArg<T> {
 pub type TypedArg = Arg<Rc<Type>>;
 pub type UntypedArg = Arg<()>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Arg<T> {
     pub arg_name: ArgName,
     pub location: Span,
@@ -632,7 +797,31 @@ impl<A> Arg<A> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub type TypedArgVia = ArgVia<Rc<Type>, TypedExpr>;
+pub type UntypedArgVia = ArgVia<(), UntypedExpr>;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ArgVia<T, Expr> {
+    pub arg_name: ArgName,
+    pub location: Span,
+    pub via: Expr,
+    pub tipo: T,
+    pub annotation: Option<Annotation>,
+}
+
+impl<T, Ann> From<ArgVia<T, Ann>> for Arg<T> {
+    fn from(arg: ArgVia<T, Ann>) -> Arg<T> {
+        Arg {
+            arg_name: arg.arg_name,
+            location: arg.location,
+            tipo: arg.tipo,
+            annotation: None,
+            doc: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArgName {
     Discarded {
         name: String,
@@ -663,26 +852,21 @@ impl ArgName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UnqualifiedImport {
     pub location: Span,
     pub name: String,
     pub as_name: Option<String>,
-    pub layer: Layer,
 }
 
 impl UnqualifiedImport {
     pub fn variable_name(&self) -> &str {
         self.as_name.as_deref().unwrap_or(&self.name)
     }
-
-    pub fn is_value(&self) -> bool {
-        self.layer.is_value()
-    }
 }
 
 // TypeAst
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Annotation {
     Constructor {
         location: Span,
@@ -736,6 +920,15 @@ impl Annotation {
     pub fn int(location: Span) -> Self {
         Annotation::Constructor {
             name: "Int".to_string(),
+            module: None,
+            arguments: vec![],
+            location,
+        }
+    }
+
+    pub fn data(location: Span) -> Self {
+        Annotation::Constructor {
+            name: "Data".to_string(),
             module: None,
             arguments: vec![],
             location,
@@ -817,21 +1010,7 @@ impl Annotation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Layer {
-    #[default]
-    Value,
-    Type,
-}
-
-impl Layer {
-    /// Returns `true` if the layer is [`Value`].
-    pub fn is_value(&self) -> bool {
-        matches!(self, Self::Value)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinOp {
     // Boolean logic
     And,
@@ -864,11 +1043,11 @@ impl From<LogicalOpChainKind> for BinOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UnOp {
-    // !
+    /// !
     Not,
-    // -
+    /// -
     Negate,
 }
 
@@ -895,7 +1074,7 @@ impl BinOp {
 pub type UntypedPattern = Pattern<(), ()>;
 pub type TypedPattern = Pattern<PatternConstructor, Rc<Type>>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Pattern<Constructor, Type> {
     Int {
         location: Span,
@@ -999,7 +1178,7 @@ impl TypedPattern {
             | Pattern::Tuple {
                 elems: elements, ..
             } => match &**value {
-                Type::Tuple { elems } => elements
+                Type::Tuple { elems, .. } => elements
                     .iter()
                     .zip(elems.iter())
                     .find_map(|(e, t)| e.find_node(byte_index, t))
@@ -1043,7 +1222,7 @@ impl TypedPattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, serde::Serialize, serde::Deserialize)]
 pub enum ByteArrayFormatPreference {
     HexadecimalString,
     ArrayOfBytes(Base),
@@ -1094,7 +1273,7 @@ impl Display for Bls12_381PointType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Curve {
     Bls12_381(Bls12_381Point),
 }
@@ -1122,6 +1301,112 @@ pub enum Bls12_381Point {
     G2(blst::blst_p2),
 }
 
+impl serde::Serialize for Bls12_381Point {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match *self {
+            Bls12_381Point::G1(ref p1) => {
+                // Assuming `to_bytes` for compression to Vec<u8>
+                let bytes = p1.compress();
+
+                // Serialize as a tuple with a tag for differentiation
+                serializer.serialize_newtype_variant("Bls12_381Point", 0, "G1", &bytes)
+            }
+            Bls12_381Point::G2(ref p2) => {
+                let bytes = p2.compress();
+
+                serializer.serialize_newtype_variant("Bls12_381Point", 1, "G2", &bytes)
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Bls12_381Point {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        enum Field {
+            G1,
+            G2,
+        }
+
+        impl<'de> serde::Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("`G1` or `G2`")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "G1" => Ok(Field::G1),
+                            "G2" => Ok(Field::G2),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct Bls12_381PointVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for Bls12_381PointVisitor {
+            type Value = Bls12_381Point;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Bls12_381Point")
+            }
+
+            fn visit_seq<V>(self, mut seq: V) -> Result<Bls12_381Point, V::Error>
+            where
+                V: serde::de::SeqAccess<'de>,
+            {
+                let tag = seq
+                    .next_element::<Field>()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+
+                let bytes = seq
+                    .next_element::<Vec<u8>>()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+
+                match tag {
+                    Field::G1 => {
+                        let p1 =
+                            blst::blst_p1::uncompress(&bytes).map_err(serde::de::Error::custom)?;
+
+                        Ok(Bls12_381Point::G1(p1))
+                    }
+                    Field::G2 => {
+                        let p2 =
+                            blst::blst_p2::uncompress(&bytes).map_err(serde::de::Error::custom)?;
+
+                        Ok(Bls12_381Point::G2(p2))
+                    }
+                }
+            }
+        }
+
+        const FIELDS: &[&str] = &["G1", "G2"];
+
+        deserializer.deserialize_enum("Bls12_381Point", FIELDS, Bls12_381PointVisitor)
+    }
+}
+
 impl Bls12_381Point {
     pub fn tipo(&self) -> Rc<Type> {
         match self {
@@ -1137,7 +1422,7 @@ impl Default for Bls12_381Point {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, serde::Serialize, serde::Deserialize)]
 pub enum AssignmentKind {
     Let,
     Expect,
@@ -1173,7 +1458,7 @@ pub struct UntypedClause {
     pub then: UntypedExpr,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypedClause {
     pub location: Span,
     pub pattern: Pattern<PatternConstructor, Rc<Type>>,
@@ -1199,7 +1484,7 @@ impl TypedClause {
 pub type UntypedClauseGuard = ClauseGuard<()>;
 pub type TypedClauseGuard = ClauseGuard<Rc<Type>>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ClauseGuard<Type> {
     Not {
         location: Span,
@@ -1317,14 +1602,14 @@ impl TypedClauseGuard {
 pub type TypedIfBranch = IfBranch<TypedExpr>;
 pub type UntypedIfBranch = IfBranch<UntypedExpr>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IfBranch<Expr> {
     pub condition: Expr,
     pub body: Expr,
     pub location: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypedRecordUpdateArg {
     pub label: String,
     pub location: Span,
@@ -1360,30 +1645,56 @@ pub enum TraceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tracing {
-    NoTraces,
-    KeepTraces,
+    UserDefined(TraceLevel),
+    CompilerGenerated(TraceLevel),
+    All(TraceLevel),
 }
 
-impl From<bool> for Tracing {
-    fn from(keep: bool) -> Self {
-        if keep {
-            Tracing::KeepTraces
-        } else {
-            Tracing::NoTraces
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceLevel {
+    Silent,  // No traces
+    Compact, // Line numbers only
+    Verbose, // Full verbose traces as provided by the user or the compiler
+}
+
+impl Tracing {
+    pub fn silent() -> Self {
+        Tracing::All(TraceLevel::Silent)
+    }
+
+    /// Get the tracing level based on the context we're in.
+    pub fn trace_level(&self, is_code_gen: bool) -> TraceLevel {
+        match self {
+            Tracing::UserDefined(lvl) => {
+                if is_code_gen {
+                    TraceLevel::Silent
+                } else {
+                    *lvl
+                }
+            }
+            Tracing::CompilerGenerated(lvl) => {
+                if is_code_gen {
+                    *lvl
+                } else {
+                    TraceLevel::Silent
+                }
+            }
+            Tracing::All(lvl) => *lvl,
         }
     }
 }
 
-impl From<Tracing> for bool {
-    fn from(value: Tracing) -> Self {
-        match value {
-            Tracing::NoTraces => false,
-            Tracing::KeepTraces => true,
+impl Display for TraceLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            TraceLevel::Silent => f.write_str("silent"),
+            TraceLevel::Compact => f.write_str("compact"),
+            TraceLevel::Verbose => f.write_str("verbose"),
         }
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

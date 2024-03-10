@@ -10,15 +10,14 @@ pub mod pattern;
 pub mod token;
 mod utils;
 
+use crate::{ast, line_numbers::LineNumbers};
 pub use annotation::parser as annotation;
-pub use definition::parser as definition;
-pub use expr::parser as expression;
-pub use pattern::parser as pattern;
-
-use crate::ast;
 use chumsky::prelude::*;
+pub use definition::parser as definition;
 use error::ParseError;
+pub use expr::parser as expression;
 use extra::ModuleExtra;
+pub use pattern::parser as pattern;
 
 pub fn module(
     src: &str,
@@ -30,8 +29,11 @@ pub fn module(
 
     let definitions = definition().repeated().then_ignore(end()).parse(stream)?;
 
+    let lines = LineNumbers::new(src);
+
     let module = ast::UntypedModule {
         kind,
+        lines,
         definitions,
         docs: vec![],
         name: "".to_string(),

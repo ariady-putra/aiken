@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Definition, ModuleKind, Tracing, TypedModule, UntypedModule},
+    ast::{Definition, ModuleKind, TraceLevel, Tracing, TypedModule, UntypedModule},
     builtins,
     expr::TypedExpr,
     parser,
@@ -31,7 +31,7 @@ fn check_module(
         kind,
         "test/project",
         &module_types,
-        Tracing::KeepTraces,
+        Tracing::All(TraceLevel::Verbose),
         &mut warnings,
     );
 
@@ -51,6 +51,33 @@ fn check_validator(
 }
 
 #[test]
+fn bls12_381_elements_in_data_type() {
+    let source_code = r#"
+        type Datum {
+          D0(G1Element)
+          D1(G2Element)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn bls12_381_ml_result_in_data_type() {
+    let source_code = r#"
+        type Datum {
+          thing: MillerLoopResult
+        }
+    "#;
+
+    let res = check(parse(source_code));
+
+    dbg!(&res);
+
+    assert!(matches!(res, Err((_, Error::IllegalTypeInData { .. }))))
+}
+
+#[test]
 fn validator_illegal_return_type() {
     let source_code = r#"
       validator {
@@ -67,6 +94,19 @@ fn validator_illegal_return_type() {
 }
 
 #[test]
+fn implicitly_discard_void() {
+    let source_code = r#"
+      pub fn label(str: String) -> Void {
+        trace str Void
+      }
+    "#;
+
+    let (warnings, _) = check_validator(parse(source_code)).expect("should type-check");
+
+    assert!(warnings.is_empty(), "no warnings: {warnings:#?}");
+}
+
+#[test]
 fn validator_illegal_arity() {
     let source_code = r#"
       validator {
@@ -79,6 +119,70 @@ fn validator_illegal_arity() {
     assert!(matches!(
         check_validator(parse(source_code)),
         Err((_, Error::IncorrectValidatorArity { .. }))
+    ))
+}
+
+#[test]
+fn list_illegal_inhabitants() {
+    let source_code = r#"
+        fn main() {
+          [identity]
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
+    ))
+}
+
+#[test]
+fn tuple_illegal_inhabitants() {
+    let source_code = r#"
+        fn main() {
+          (identity, always)
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
+    ))
+}
+
+#[test]
+fn illegal_inhabitants_nested() {
+    let source_code = r#"
+        fn main() {
+          [(identity, always)]
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
+    ))
+}
+
+#[test]
+fn illegal_inhabitants_returned() {
+    let source_code = r#"
+        type Fuzzer<a> = fn(PRNG) -> (a, PRNG)
+
+        fn constant(a: a) -> Fuzzer<a> {
+          fn (prng) {
+            (a, prng)
+          }
+        }
+
+        fn main() -> Fuzzer<Fuzzer<Int>> {
+          constant(constant(42))
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
     ))
 }
 
@@ -211,6 +315,33 @@ fn exhaustiveness_simple() {
             }
         )) if unmatched[0] == "Baz"
     ))
+}
+
+#[test]
+fn validator_args_no_annotation() {
+    let source_code = r#"
+      validator(d) {
+        fn foo(a, b, c) {
+          True
+        }
+      }
+    "#;
+
+    let (_, module) = check_validator(parse(source_code)).unwrap();
+
+    module.definitions().for_each(|def| {
+        let Definition::Validator(validator) = def else {
+            unreachable!()
+        };
+
+        validator.params.iter().for_each(|param| {
+            assert!(param.tipo.is_data());
+        });
+
+        validator.fun.arguments.iter().for_each(|arg| {
+            assert!(arg.tipo.is_data());
+        })
+    })
 }
 
 #[test]
@@ -1169,6 +1300,113 @@ fn pipe_with_wrong_type_and_full_args() {
             _,
             Error::CouldNotUnify {
                 situation: Some(UnifyErrorSituation::PipeTypeMismatch),
+                ..
+            }
+        ))
+    ))
+}
+
+#[test]
+fn fuzzer_ok_basic() {
+    let source_code = r#"
+        fn int() -> Fuzzer<Int> { todo }
+
+        test prop(n via int()) { todo }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn fuzzer_ok_explicit() {
+    let source_code = r#"
+        fn int(prng: PRNG) -> Option<(PRNG, Int)> { todo }
+
+        test prop(n via int) { todo }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn fuzzer_ok_list() {
+    let source_code = r#"
+        fn int() -> Fuzzer<Int> { todo }
+        fn list(a: Fuzzer<a>) -> Fuzzer<List<a>> { todo }
+
+        test prop(xs via list(int())) { todo }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn fuzzer_err_unbound() {
+    let source_code = r#"
+        fn any() -> Fuzzer<a> { todo }
+        fn list(a: Fuzzer<a>) -> Fuzzer<List<a>> { todo }
+
+        test prop(xs via list(any())) { todo }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::GenericLeftAtBoundary { .. }))
+    ))
+}
+
+#[test]
+fn fuzzer_err_unify_1() {
+    let source_code = r#"
+        test prop(xs via Void) { todo }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((
+            _,
+            Error::CouldNotUnify {
+                situation: None,
+                ..
+            }
+        ))
+    ))
+}
+
+#[test]
+fn fuzzer_err_unify_2() {
+    let source_code = r#"
+        fn any() -> Fuzzer<a> { todo }
+        test prop(xs via any) { todo }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((
+            _,
+            Error::CouldNotUnify {
+                situation: None,
+                ..
+            }
+        ))
+    ))
+}
+
+#[test]
+fn fuzzer_err_unify_3() {
+    let source_code = r#"
+        fn list(a: Fuzzer<a>) -> Fuzzer<List<a>> { todo }
+        fn int() -> Fuzzer<Int> { todo }
+
+        test prop(xs: Int via list(int())) { todo }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((
+            _,
+            Error::CouldNotUnify {
+                situation: Some(UnifyErrorSituation::FuzzerAnnotationMismatch),
                 ..
             }
         ))

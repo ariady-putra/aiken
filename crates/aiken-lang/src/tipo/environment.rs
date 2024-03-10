@@ -1,26 +1,24 @@
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Deref,
-    rc::Rc,
-};
-
-use crate::{
-    ast::{
-        Annotation, CallArg, DataType, Definition, Function, ModuleConstant, ModuleKind,
-        RecordConstructor, RecordConstructorArg, Span, TypeAlias, TypedDefinition, TypedPattern,
-        UnqualifiedImport, UntypedArg, UntypedDefinition, Use, Validator, PIPE_VARIABLE,
-    },
-    builtins::{self, function, generic_var, tuple, unbound_var},
-    tipo::fields::FieldMap,
-    IdGenerator,
-};
-
 use super::{
     error::{Error, Snippet, Warning},
     exhaustive::{simplify, Matrix, PatternStack},
     hydrator::Hydrator,
     AccessorsMap, RecordAccessor, Type, TypeConstructor, TypeInfo, TypeVar, ValueConstructor,
     ValueConstructorVariant,
+};
+use crate::{
+    ast::{
+        Annotation, CallArg, DataType, Definition, Function, ModuleConstant, ModuleKind,
+        RecordConstructor, RecordConstructorArg, Span, TypeAlias, TypedDefinition, TypedPattern,
+        UnqualifiedImport, UntypedArg, UntypedDefinition, Use, Validator, PIPE_VARIABLE,
+    },
+    builtins::{function, generic_var, tuple, unbound_var},
+    tipo::{fields::FieldMap, TypeAliasAnnotation},
+    IdGenerator,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+    rc::Rc,
 };
 
 #[derive(Debug)]
@@ -72,6 +70,9 @@ pub struct Environment<'a> {
 
     pub unused_modules: HashMap<String, Span>,
 
+    /// A mapping from known annotations to their resolved type.
+    pub annotations: HashMap<Annotation, Rc<Type>>,
+
     /// Warnings
     pub warnings: &'a mut Vec<Warning>,
 }
@@ -86,6 +87,12 @@ impl<'a> Environment<'a> {
         self.handle_unused(unused);
 
         self.scope = data.local_values;
+    }
+
+    pub fn annotate(&mut self, return_type: Rc<Type>, annotation: &Annotation) -> Rc<Type> {
+        self.annotations
+            .insert(annotation.clone(), return_type.clone());
+        return_type
     }
 
     /// Converts entities with a usage count of 0 to warnings
@@ -110,16 +117,18 @@ impl<'a> Environment<'a> {
         fn_location: Span,
         call_location: Span,
     ) -> Result<(Vec<Rc<Type>>, Rc<Type>), Error> {
-        if let Type::Var { tipo } = tipo.deref() {
+        if let Type::Var { tipo, alias } = tipo.deref() {
             let new_value = match tipo.borrow().deref() {
-                TypeVar::Link { tipo, .. } => {
-                    return self.match_fun_type(tipo.clone(), arity, fn_location, call_location);
+                TypeVar::Link { tipo } => {
+                    let (args, ret) =
+                        self.match_fun_type(tipo.clone(), arity, fn_location, call_location)?;
+                    return Ok((args, Type::with_alias(ret, alias.clone())));
                 }
 
                 TypeVar::Unbound { .. } => {
                     let args: Vec<_> = (0..arity).map(|_| self.new_unbound_var()).collect();
 
-                    let ret = self.new_unbound_var();
+                    let ret = Type::with_alias(self.new_unbound_var(), alias.clone());
 
                     Some((args, ret))
                 }
@@ -132,11 +141,11 @@ impl<'a> Environment<'a> {
                     tipo: function(args.clone(), ret.clone()),
                 };
 
-                return Ok((args, ret));
+                return Ok((args, Type::with_alias(ret, alias.clone())));
             }
         }
 
-        if let Type::Fn { args, ret } = tipo.deref() {
+        if let Type::Fn { args, ret, .. } = tipo.deref() {
             return if args.len() != arity {
                 Err(Error::IncorrectFunctionCallArity {
                     expected: args.len(),
@@ -540,6 +549,7 @@ impl<'a> Environment<'a> {
                 name,
                 module,
                 args,
+                alias,
             } => {
                 let args = args
                     .iter()
@@ -549,45 +559,63 @@ impl<'a> Environment<'a> {
                     public: *public,
                     name: name.clone(),
                     module: module.clone(),
+                    alias: alias.clone(),
                     args,
                 })
             }
 
-            Type::Var { tipo } => {
+            Type::Var { tipo, alias } => {
                 match tipo.borrow().deref() {
-                    TypeVar::Link { tipo } => return self.instantiate(tipo.clone(), ids, hydrator),
+                    TypeVar::Link { tipo } => {
+                        return Type::with_alias(
+                            self.instantiate(tipo.clone(), ids, hydrator),
+                            alias.clone(),
+                        );
+                    }
 
-                    TypeVar::Unbound { .. } => return Rc::new(Type::Var { tipo: tipo.clone() }),
+                    TypeVar::Unbound { .. } => {
+                        return Rc::new(Type::Var {
+                            tipo: tipo.clone(),
+                            alias: alias.clone(),
+                        });
+                    }
 
                     TypeVar::Generic { id } => match ids.get(id) {
-                        Some(t) => return t.clone(),
+                        Some(t) => return Type::with_alias(t.clone(), alias.clone()),
                         None => {
                             if !hydrator.is_rigid(id) {
                                 // Check this in the hydrator, i.e. is it a created type
-                                let v = self.new_unbound_var();
+                                let v = Type::with_alias(self.new_unbound_var(), alias.clone());
                                 ids.insert(*id, v.clone());
                                 return v;
-                            } else {
-                                // tracing::trace!(id = id, "not_instantiating_rigid_type_var")
                             }
                         }
                     },
                 }
-                Rc::new(Type::Var { tipo: tipo.clone() })
+                Rc::new(Type::Var {
+                    tipo: tipo.clone(),
+                    alias: alias.clone(),
+                })
             }
 
-            Type::Fn { args, ret, .. } => function(
-                args.iter()
-                    .map(|t| self.instantiate(t.clone(), ids, hydrator))
-                    .collect(),
-                self.instantiate(ret.clone(), ids, hydrator),
+            Type::Fn { args, ret, alias } => Type::with_alias(
+                function(
+                    args.iter()
+                        .map(|t| self.instantiate(t.clone(), ids, hydrator))
+                        .collect(),
+                    self.instantiate(ret.clone(), ids, hydrator),
+                ),
+                alias.clone(),
             ),
 
-            Type::Tuple { elems } => tuple(
-                elems
-                    .iter()
-                    .map(|t| self.instantiate(t.clone(), ids, hydrator))
-                    .collect(),
+            Type::Tuple { elems, alias } => Type::with_alias(
+                tuple(
+                    elems
+                        .iter()
+                        .map(|t| self.instantiate(t.clone(), ids, hydrator))
+                        .collect(),
+                ),
+                alias.clone(),
             ),
         }
     }
@@ -657,6 +685,7 @@ impl<'a> Environment<'a> {
             imported_types: HashSet::new(),
             current_module,
             current_kind,
+            annotations: HashMap::new(),
             warnings,
             entity_usages: vec![HashMap::new()],
         }
@@ -971,6 +1000,7 @@ impl<'a> Environment<'a> {
                     module: module.to_owned(),
                     name: name.clone(),
                     args: parameters.clone(),
+                    alias: None,
                 });
 
                 hydrators.insert(name.to_string(), hydrator);
@@ -1014,7 +1044,18 @@ impl<'a> Environment<'a> {
                 hydrator.disallow_new_type_variables();
 
                 // Create the type that the alias resolves to
-                let tipo = hydrator.type_from_annotation(resolved_type, self)?;
+                let tipo = hydrator
+                    .type_from_annotation(resolved_type, self)?
+                    .as_ref()
+                    .to_owned()
+                    .set_alias(Some(
+                        TypeAliasAnnotation {
+                            alias: name.to_string(),
+                            parameters: args.to_vec(),
+                            annotation: resolved_type.clone(),
+                        }
+                        .into(),
+                    ));
 
                 self.insert_type_constructor(
                     name.clone(),
@@ -1134,10 +1175,21 @@ impl<'a> Environment<'a> {
                 params,
                 ..
             }) if kind.is_validator() => {
+                let default_annotation = |mut arg: UntypedArg| {
+                    if arg.annotation.is_none() {
+                        arg.annotation = Some(Annotation::data(arg.location));
+
+                        arg
+                    } else {
+                        arg
+                    }
+                };
+
                 let temp_params: Vec<UntypedArg> = params
                     .iter()
                     .cloned()
                     .chain(fun.arguments.clone())
+                    .map(default_annotation)
                     .collect();
 
                 self.register_function(
@@ -1155,6 +1207,7 @@ impl<'a> Environment<'a> {
                         .iter()
                         .cloned()
                         .chain(other.arguments.clone())
+                        .map(default_annotation)
                         .collect();
 
                     self.register_function(
@@ -1175,23 +1228,22 @@ impl<'a> Environment<'a> {
                 })
             }
 
-            Definition::Test(Function { name, location, .. }) => {
-                assert_unique_value_name(names, name, location)?;
-                hydrators.insert(name.clone(), Hydrator::new());
-                let arg_types = vec![];
-                let return_type = builtins::bool();
-                self.insert_variable(
-                    name.clone(),
-                    ValueConstructorVariant::ModuleFn {
-                        name: name.clone(),
-                        field_map: None,
-                        module: module_name.to_owned(),
-                        arity: 0,
-                        location: *location,
-                        builtin: None,
-                    },
-                    function(arg_types, return_type),
-                );
+            Definition::Test(test) => {
+                let arguments = test
+                    .arguments
+                    .iter()
+                    .map(|arg| arg.clone().into())
+                    .collect::<Vec<_>>();
+
+                self.register_function(
+                    &test.name,
+                    &arguments,
+                    &test.return_annotation,
+                    module_name,
+                    hydrators,
+                    names,
+                    &test.location,
+                )?;
             }
 
             Definition::DataType(DataType {
@@ -1332,13 +1384,13 @@ impl<'a> Environment<'a> {
         }
 
         // Collapse right hand side type links. Left hand side will be collapsed in the next block.
-        if let Type::Var { tipo } = t2.deref() {
-            if let TypeVar::Link { tipo } = tipo.borrow().deref() {
+        if let Type::Var { tipo, .. } = t2.deref() {
+            if let TypeVar::Link { tipo, .. } = tipo.borrow().deref() {
                 return self.unify(t1, tipo.clone(), location, allow_cast);
             }
         }
 
-        if let Type::Var { tipo } = t1.deref() {
+        if let Type::Var { tipo, .. } = t1.deref() {
             enum Action {
                 Unify(Rc<Type>),
                 CouldNotUnify,
@@ -1354,7 +1406,7 @@ impl<'a> Environment<'a> {
                 }
 
                 TypeVar::Generic { id } => {
-                    if let Type::Var { tipo } = t2.deref() {
+                    if let Type::Var { tipo, .. } = t2.deref() {
                         if tipo.borrow().is_unbound() {
                             *tipo.borrow_mut() = TypeVar::Generic { id: *id };
                             return Ok(());
@@ -1621,10 +1673,10 @@ pub enum EntityKind {
 /// could cause naively-implemented type checking to diverge.
 /// While traversing the type tree.
 fn unify_unbound_type(tipo: Rc<Type>, own_id: u64, location: Span) -> Result<(), Error> {
-    if let Type::Var { tipo } = tipo.deref() {
+    if let Type::Var { tipo, .. } = tipo.deref() {
         let new_value = match tipo.borrow().deref() {
             TypeVar::Link { tipo, .. } => {
-                return unify_unbound_type(tipo.clone(), own_id, location)
+                return unify_unbound_type(tipo.clone(), own_id, location);
             }
 
             TypeVar::Unbound { id } => {
@@ -1653,7 +1705,7 @@ fn unify_unbound_type(tipo: Rc<Type>, own_id: u64, location: Span) -> Result<(),
             Ok(())
         }
 
-        Type::Fn { args, ret } => {
+        Type::Fn { args, ret, .. } => {
             for arg in args {
                 unify_unbound_type(arg.clone(), own_id, location)?;
             }
@@ -1748,7 +1800,7 @@ pub(super) fn assert_no_labeled_arguments<A>(args: &[CallArg<A>]) -> Option<(Spa
 }
 
 pub(super) fn collapse_links(t: Rc<Type>) -> Rc<Type> {
-    if let Type::Var { tipo } = t.deref() {
+    if let Type::Var { tipo, .. } = t.deref() {
         if let TypeVar::Link { tipo } = tipo.borrow().deref() {
             return tipo.clone();
         }
@@ -1767,7 +1819,7 @@ fn get_compatible_record_fields<A>(
         return compatible;
     }
 
-    let first = match constructors.get(0) {
+    let first = match constructors.first() {
         Some(first) => first,
         None => return compatible,
     };
@@ -1790,17 +1842,24 @@ fn get_compatible_record_fields<A>(
 #[allow(clippy::only_used_in_recursion)]
 pub(crate) fn generalise(t: Rc<Type>, ctx_level: usize) -> Rc<Type> {
     match t.deref() {
-        Type::Var { tipo } => match tipo.borrow().deref() {
-            TypeVar::Unbound { id } => generic_var(*id),
-            TypeVar::Link { tipo } => generalise(tipo.clone(), ctx_level),
-            TypeVar::Generic { .. } => Rc::new(Type::Var { tipo: tipo.clone() }),
-        },
+        Type::Var { tipo, alias } => Type::with_alias(
+            match tipo.borrow().deref() {
+                TypeVar::Unbound { id } => generic_var(*id),
+                TypeVar::Link { tipo } => generalise(tipo.clone(), ctx_level),
+                TypeVar::Generic { .. } => Rc::new(Type::Var {
+                    tipo: tipo.clone(),
+                    alias: None,
+                }),
+            },
+            alias.clone(),
+        ),
 
         Type::App {
             public,
             module,
             name,
             args,
+            alias,
         } => {
             let args = args
                 .iter()
@@ -1812,21 +1871,28 @@ pub(crate) fn generalise(t: Rc<Type>, ctx_level: usize) -> Rc<Type> {
                 module: module.clone(),
                 name: name.clone(),
                 args,
+                alias: alias.clone(),
             })
         }
 
-        Type::Fn { args, ret } => function(
-            args.iter()
-                .map(|t| generalise(t.clone(), ctx_level))
-                .collect(),
-            generalise(ret.clone(), ctx_level),
+        Type::Fn { args, ret, alias } => Type::with_alias(
+            function(
+                args.iter()
+                    .map(|t| generalise(t.clone(), ctx_level))
+                    .collect(),
+                generalise(ret.clone(), ctx_level),
+            ),
+            alias.clone(),
         ),
 
-        Type::Tuple { elems } => tuple(
-            elems
-                .iter()
-                .map(|t| generalise(t.clone(), ctx_level))
-                .collect(),
+        Type::Tuple { elems, alias } => Type::with_alias(
+            tuple(
+                elems
+                    .iter()
+                    .map(|t| generalise(t.clone(), ctx_level))
+                    .collect(),
+            ),
+            alias.clone(),
         ),
     }
 }

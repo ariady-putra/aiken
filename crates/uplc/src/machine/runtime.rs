@@ -2,12 +2,14 @@ use std::{mem::size_of, ops::Deref, rc::Rc};
 
 use num_bigint::BigInt;
 use num_integer::Integer;
+use num_traits::{Signed, Zero};
 use once_cell::sync::Lazy;
-use pallas_primitives::babbage::{Constr, Language, PlutusData};
+use pallas::ledger::primitives::babbage::{Language, PlutusData};
 
 use crate::{
-    ast::{Constant, Type},
+    ast::{Constant, Data, Type},
     builtins::DefaultFunction,
+    machine::value::integer_log2,
     plutus_data_to_bytes,
 };
 
@@ -31,6 +33,8 @@ static SCALAR_PERIOD: Lazy<BigInt> = Lazy::new(|| {
 const BLST_P1_COMPRESSED_SIZE: usize = 48;
 
 const BLST_P2_COMPRESSED_SIZE: usize = 96;
+
+const INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH: i64 = 8192;
 
 //#[derive(std::cmp::PartialEq)]
 //pub enum EvalMode {
@@ -181,6 +185,8 @@ impl DefaultFunction {
             DefaultFunction::Bls12_381_MillerLoop => 2,
             DefaultFunction::Bls12_381_MulMlResult => 2,
             DefaultFunction::Bls12_381_FinalVerify => 2,
+            DefaultFunction::IntegerToByteString => 3,
+            DefaultFunction::ByteStringToInteger => 2,
         }
     }
 
@@ -259,6 +265,8 @@ impl DefaultFunction {
             DefaultFunction::Bls12_381_MillerLoop => 0,
             DefaultFunction::Bls12_381_MulMlResult => 0,
             DefaultFunction::Bls12_381_FinalVerify => 0,
+            DefaultFunction::IntegerToByteString => 0,
+            DefaultFunction::ByteStringToInteger => 0,
         }
     }
 
@@ -752,11 +760,7 @@ impl DefaultFunction {
 
                 let i: u64 = i.try_into().unwrap();
 
-                let constr_data = PlutusData::Constr(Constr {
-                    tag: convert_constr_to_tag(i).unwrap_or(ANY_TAG),
-                    any_constructor: convert_constr_to_tag(i).map_or(Some(i), |_| None),
-                    fields: data_list,
-                });
+                let constr_data = Data::constr(i, data_list);
 
                 let value = Value::data(constr_data);
 
@@ -820,7 +824,7 @@ impl DefaultFunction {
             DefaultFunction::BData => {
                 let b = args[0].unwrap_byte_string()?;
 
-                let value = Value::data(PlutusData::BoundedBytes(b.clone().try_into().unwrap()));
+                let value = Value::data(PlutusData::BoundedBytes(b.clone().into()));
 
                 Ok(value)
             }
@@ -1295,6 +1299,91 @@ impl DefaultFunction {
                 let verified = unsafe { blst::blst_fp12_finalverify(arg1, arg2) };
 
                 let constant = Constant::Bool(verified);
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::IntegerToByteString => {
+                let endianness = args[0].unwrap_bool()?;
+                let size = args[1].unwrap_integer()?;
+                let input = args[2].unwrap_integer()?;
+
+                if size.is_negative() {
+                    return Err(Error::IntegerToByteStringNegativeSize(size.clone()));
+                }
+
+                if size > &INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH.into() {
+                    return Err(Error::IntegerToByteStringSizeTooBig(
+                        size.clone(),
+                        INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH,
+                    ));
+                }
+
+                if size.is_zero()
+                    && integer_log2(input.clone())
+                        >= 8 * INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH
+                {
+                    let required = integer_log2(input.clone()) / 8 + 1;
+
+                    return Err(Error::IntegerToByteStringSizeTooBig(
+                        required.into(),
+                        INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH,
+                    ));
+                }
+
+                if input.is_negative() {
+                    return Err(Error::IntegerToByteStringNegativeInput(input.clone()));
+                }
+
+                let size_unwrapped: usize = size.try_into().unwrap();
+
+                if input.is_zero() {
+                    let constant = Constant::ByteString(vec![0; size_unwrapped]);
+
+                    return Ok(Value::Con(constant.into()));
+                }
+
+                let (_, mut bytes) = if *endianness {
+                    input.to_bytes_be()
+                } else {
+                    input.to_bytes_le()
+                };
+
+                if !size.is_zero() && bytes.len() > size_unwrapped {
+                    return Err(Error::IntegerToByteStringSizeTooSmall(
+                        size.clone(),
+                        bytes.len(),
+                    ));
+                }
+
+                if size_unwrapped > 0 {
+                    let padding_size = size_unwrapped - bytes.len();
+
+                    let mut padding = vec![0; padding_size];
+
+                    if *endianness {
+                        padding.append(&mut bytes);
+
+                        bytes = padding;
+                    } else {
+                        bytes.append(&mut padding);
+                    }
+                };
+
+                let constant = Constant::ByteString(bytes);
+
+                Ok(Value::Con(constant.into()))
+            }
+            DefaultFunction::ByteStringToInteger => {
+                let endianness = args[0].unwrap_bool()?;
+                let bytes = args[1].unwrap_byte_string()?;
+
+                let number = if *endianness {
+                    BigInt::from_bytes_be(num_bigint::Sign::Plus, bytes)
+                } else {
+                    BigInt::from_bytes_le(num_bigint::Sign::Plus, bytes)
+                };
+
+                let constant = Constant::Integer(number);
 
                 Ok(Value::Con(constant.into()))
             }

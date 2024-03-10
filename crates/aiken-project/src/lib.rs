@@ -10,22 +10,35 @@ pub mod options;
 pub mod package_name;
 pub mod paths;
 pub mod pretty;
-pub mod script;
 pub mod telemetry;
-#[cfg(test)]
-mod tests;
+pub mod test_framework;
+pub mod utils;
 pub mod watch;
 
-use crate::blueprint::{
-    definitions::Definitions,
-    schema::{Annotated, Schema},
-    Blueprint,
+#[cfg(test)]
+mod tests;
+
+use crate::{
+    blueprint::{
+        definitions::Definitions,
+        schema::{Annotated, Schema},
+        Blueprint,
+    },
+    config::Config,
+    error::{Error, Warning},
+    module::{CheckedModule, CheckedModules, ParsedModule, ParsedModules},
+    telemetry::Event,
 };
 use aiken_lang::{
-    ast::{Definition, Function, ModuleKind, Tracing, TypedDataType, TypedFunction, Validator},
+    ast::{
+        DataTypeKey, Definition, FunctionAccessKey, ModuleKind, Tracing, TypedDataType,
+        TypedFunction,
+    },
     builtins,
-    gen_uplc::builder::{DataTypeKey, FunctionAccessKey},
-    tipo::TypeInfo,
+    expr::UntypedExpr,
+    gen_uplc::CodeGenerator,
+    line_numbers::LineNumbers,
+    tipo::{Type, TypeInfo},
     IdGenerator,
 };
 use indexmap::IndexMap;
@@ -35,27 +48,20 @@ use package_name::PackageName;
 use pallas::ledger::{
     addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, StakePayload},
     primitives::babbage::{self as cardano, PolicyId},
+    traverse::ComputeHash,
 };
-use pallas_traverse::ComputeHash;
-use script::{EvalHint, EvalInfo, Script};
 use std::{
     collections::HashMap,
     fs::{self, File},
     io::BufReader,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 use telemetry::EventListener;
+use test_framework::{Test, TestResult};
 use uplc::{
-    ast::{DeBruijn, Name, Program, Term},
-    machine::cost_model::ExBudget,
+    ast::{Constant, Name, Program},
     PlutusData,
-};
-
-use crate::{
-    config::Config,
-    error::{Error, Warning},
-    module::{CheckedModule, CheckedModules, ParsedModule, ParsedModules},
-    telemetry::Event,
 };
 
 #[derive(Debug)]
@@ -83,9 +89,11 @@ where
     root: PathBuf,
     sources: Vec<Source>,
     warnings: Vec<Warning>,
+    checks_count: Option<usize>,
     event_listener: T,
     functions: IndexMap<FunctionAccessKey, TypedFunction>,
     data_types: IndexMap<DataTypeKey, TypedDataType>,
+    module_sources: HashMap<String, (String, LineNumbers)>,
 }
 
 impl<T> Project<T>
@@ -121,10 +129,22 @@ where
             root,
             sources: vec![],
             warnings: vec![],
+            checks_count: None,
             event_listener,
             functions,
             data_types,
+            module_sources: HashMap::new(),
         }
+    }
+
+    pub fn new_generator(&'_ self, tracing: Tracing) -> CodeGenerator<'_> {
+        CodeGenerator::new(
+            utils::indexmap::as_ref_values(&self.functions),
+            utils::indexmap::as_ref_values(&self.data_types),
+            utils::indexmap::as_str_ref_values(&self.module_types),
+            utils::indexmap::as_str_ref_values(&self.module_sources),
+            tracing,
+        )
     }
 
     pub fn warnings(&mut self) -> Vec<Warning> {
@@ -160,7 +180,11 @@ where
         self.compile(options)
     }
 
-    pub fn docs(&mut self, destination: Option<PathBuf>) -> Result<(), Vec<Error>> {
+    pub fn docs(
+        &mut self,
+        destination: Option<PathBuf>,
+        include_dependencies: bool,
+    ) -> Result<(), Vec<Error>> {
         self.compile_deps()?;
 
         self.event_listener
@@ -176,7 +200,7 @@ where
 
         let parsed_modules = self.parse_sources(self.config.name.clone())?;
 
-        self.type_check(parsed_modules, Tracing::NoTraces, false)?;
+        self.type_check(parsed_modules, Tracing::silent(), false, false)?;
 
         self.event_listener.handle_event(Event::GeneratingDocFiles {
             output_path: destination.clone(),
@@ -185,7 +209,9 @@ where
         let modules = self
             .checked_modules
             .values_mut()
-            .filter(|CheckedModule { package, .. }| package == &self.config.name.to_string())
+            .filter(|CheckedModule { package, .. }| {
+                include_dependencies || package == &self.config.name.to_string()
+            })
             .map(|m| {
                 m.attach_doc_and_module_comments();
                 &*m
@@ -203,12 +229,15 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn check(
         &mut self,
         skip_tests: bool,
         match_tests: Option<Vec<String>>,
         verbose: bool,
         exact_match: bool,
+        seed: u32,
+        property_max_success: usize,
         tracing: Tracing,
     ) -> Result<(), Vec<Error>> {
         let options = Options {
@@ -220,6 +249,8 @@ where
                     match_tests,
                     verbose,
                     exact_match,
+                    seed,
+                    property_max_success,
                 }
             },
         };
@@ -265,7 +296,7 @@ where
 
         let parsed_modules = self.parse_sources(self.config.name.clone())?;
 
-        self.type_check(parsed_modules, options.tracing, true)?;
+        self.type_check(parsed_modules, options.tracing, true, false)?;
 
         match options.code_gen_mode {
             CodeGenMode::Build(uplc_dump) => {
@@ -278,12 +309,7 @@ where
                     m.attach_doc_and_module_comments();
                 });
 
-                let mut generator = self.checked_modules.new_generator(
-                    &self.functions,
-                    &self.data_types,
-                    &self.module_types,
-                    options.tracing.into(),
-                );
+                let mut generator = self.new_generator(options.tracing);
 
                 let blueprint = Blueprint::new(&self.config, &self.checked_modules, &mut generator)
                     .map_err(Error::Blueprint)?;
@@ -310,39 +336,42 @@ where
                 match_tests,
                 verbose,
                 exact_match,
+                seed,
+                property_max_success,
             } => {
                 let tests =
-                    self.collect_tests(verbose, match_tests, exact_match, options.tracing.into())?;
+                    self.collect_tests(verbose, match_tests, exact_match, options.tracing)?;
 
                 if !tests.is_empty() {
                     self.event_listener.handle_event(Event::RunningTests);
                 }
 
-                let results = self.eval_scripts(tests);
+                let tests = self.run_tests(tests, seed, property_max_success);
 
-                let errors: Vec<Error> = results
+                self.checks_count = if tests.is_empty() {
+                    None
+                } else {
+                    Some(tests.iter().fold(0, |acc, test| {
+                        acc + match test {
+                            TestResult::PropertyTestResult(r) => r.iterations,
+                            _ => 1,
+                        }
+                    }))
+                };
+
+                let errors: Vec<Error> = tests
                     .iter()
                     .filter_map(|e| {
-                        if e.success {
+                        if e.is_success() {
                             None
                         } else {
-                            Some(Error::TestFailure {
-                                name: e.script.name.clone(),
-                                path: e.script.input_path.clone(),
-                                evaluation_hint: e
-                                    .script
-                                    .evaluation_hint
-                                    .as_ref()
-                                    .map(|hint| hint.to_string()),
-                                src: e.script.program.to_pretty(),
-                                verbose,
-                            })
+                            Some(e.into_error(verbose))
                         }
                     })
                     .collect();
 
                 self.event_listener
-                    .handle_event(Event::FinishedTests { tests: results });
+                    .handle_event(Event::FinishedTests { seed, tests });
 
                 if !errors.is_empty() {
                     Err(errors)
@@ -358,6 +387,7 @@ where
         &self,
         title: Option<&String>,
         stake_address: Option<&String>,
+        mainnet: bool,
     ) -> Result<ShelleyAddress, Error> {
         // Parse stake address
         let stake_address = stake_address
@@ -397,9 +427,15 @@ where
             if n > 0 {
                 Err(blueprint::error::Error::ParameterizedValidator { n }.into())
             } else {
+                let network = if mainnet {
+                    Network::Mainnet
+                } else {
+                    Network::Testnet
+                };
+
                 Ok(validator
                     .program
-                    .address(Network::Testnet, delegation_part.to_owned()))
+                    .address(network, delegation_part.to_owned()))
             }
         })
     }
@@ -436,7 +472,7 @@ where
         &self,
         title: Option<&String>,
         ask: F,
-    ) -> Result<Term<DeBruijn>, Error>
+    ) -> Result<PlutusData, Error>
     where
         F: Fn(
             &Annotated<Schema>,
@@ -453,19 +489,19 @@ where
             |known_validators| Error::MoreThanOneValidatorFound { known_validators };
         let when_missing = |known_validators| Error::NoValidatorNotFound { known_validators };
 
-        let term = blueprint.with_validator(title, when_too_many, when_missing, |validator| {
+        let data = blueprint.with_validator(title, when_too_many, when_missing, |validator| {
             validator
                 .ask_next_parameter(&blueprint.definitions, &ask)
                 .map_err(|e| e.into())
         })?;
 
-        Ok(term)
+        Ok(data)
     }
 
     pub fn apply_parameter(
         &self,
         title: Option<&String>,
-        param: &Term<DeBruijn>,
+        param: &PlutusData,
     ) -> Result<Blueprint, Error> {
         // Read blueprint
         let blueprint = File::open(self.blueprint_path())
@@ -516,9 +552,20 @@ where
 
             self.read_package_source_files(&lib.join("lib"))?;
 
-            let parsed_modules = self.parse_sources(package.name)?;
+            let mut parsed_modules = self.parse_sources(package.name)?;
 
-            self.type_check(parsed_modules, Tracing::NoTraces, true)?;
+            use rayon::prelude::*;
+
+            parsed_modules
+                .par_iter_mut()
+                .for_each(|(_module, parsed_module)| {
+                    parsed_module
+                        .ast
+                        .definitions
+                        .retain(|def| !matches!(def, Definition::Test { .. }))
+                });
+
+            self.type_check(parsed_modules, Tracing::silent(), true, true)?;
         }
 
         Ok(())
@@ -541,60 +588,91 @@ where
     }
 
     fn parse_sources(&mut self, package_name: PackageName) -> Result<ParsedModules, Vec<Error>> {
-        let mut errors = Vec::new();
-        let mut parsed_modules = HashMap::with_capacity(self.sources.len());
+        use rayon::prelude::*;
 
-        for Source {
-            path,
-            name,
-            code,
-            kind,
-        } in self.sources.drain(0..)
-        {
-            match aiken_lang::parser::module(&code, kind) {
-                Ok((mut ast, extra)) => {
-                    // Store the name
-                    ast.name = name.clone();
-
-                    let module = ParsedModule {
-                        kind,
-                        ast,
-                        code,
-                        name,
+        let (parsed_modules, errors) = self
+            .sources
+            .par_drain(0..)
+            .fold(
+                || (ParsedModules::new(), Vec::new()),
+                |(mut parsed_modules, mut errors), elem| {
+                    let Source {
                         path,
-                        extra,
-                        package: package_name.to_string(),
-                    };
+                        name,
+                        code,
+                        kind,
+                    } = elem;
 
-                    if let Some(first) = self
-                        .defined_modules
-                        .insert(module.name.clone(), module.path.clone())
-                    {
-                        return Err(Error::DuplicateModule {
-                            module: module.name.clone(),
-                            first,
-                            second: module.path,
+                    match aiken_lang::parser::module(&code, kind) {
+                        Ok((mut ast, extra)) => {
+                            // Store the name
+                            ast.name = name.clone();
+
+                            let module = ParsedModule {
+                                kind,
+                                ast,
+                                code,
+                                name,
+                                path,
+                                extra,
+                                package: package_name.to_string(),
+                            };
+
+                            parsed_modules.insert(module.name.clone(), module);
+
+                            (parsed_modules, errors)
                         }
-                        .into());
-                    }
+                        Err(errs) => {
+                            for error in errs {
+                                errors.push((
+                                    path.clone(),
+                                    code.clone(),
+                                    NamedSource::new(path.display().to_string(), code.clone()),
+                                    Box::new(error),
+                                ))
+                            }
 
-                    parsed_modules.insert(module.name.clone(), module);
-                }
-                Err(errs) => {
-                    for error in errs {
-                        errors.push(Error::Parse {
-                            path: path.clone(),
-                            src: code.clone(),
-                            named: NamedSource::new(path.display().to_string(), code.clone()),
-                            error: Box::new(error),
-                        })
+                            (parsed_modules, errors)
+                        }
                     }
-                }
+                },
+            )
+            .reduce(
+                || (ParsedModules::new(), Vec::new()),
+                |(mut parsed_modules, mut errors), (mut parsed, mut errs)| {
+                    parsed_modules.extend(parsed.drain());
+
+                    errors.append(&mut errs);
+
+                    (parsed_modules, errors)
+                },
+            );
+
+        let mut errors: Vec<Error> = errors
+            .into_iter()
+            .map(|(path, src, named, error)| Error::Parse {
+                path,
+                src,
+                named,
+                error,
+            })
+            .collect();
+
+        for parsed_module in parsed_modules.values() {
+            if let Some(first) = self
+                .defined_modules
+                .insert(parsed_module.name.clone(), parsed_module.path.clone())
+            {
+                errors.push(Error::DuplicateModule {
+                    module: parsed_module.name.clone(),
+                    first,
+                    second: parsed_module.path.clone(),
+                });
             }
         }
 
         if errors.is_empty() {
-            Ok(parsed_modules.into())
+            Ok(parsed_modules)
         } else {
             Err(errors)
         }
@@ -605,6 +683,7 @@ where
         mut parsed_modules: ParsedModules,
         tracing: Tracing,
         validate_module_name: bool,
+        is_dependency: bool,
     ) -> Result<(), Error> {
         let processing_sequence = parsed_modules.sequence()?;
 
@@ -646,12 +725,21 @@ where
                     .into_iter()
                     .map(|w| Warning::from_type_warning(w, path.clone(), code.clone()));
 
-                self.warnings.extend(type_warnings);
+                if !is_dependency {
+                    self.warnings.extend(type_warnings);
+                }
 
-                // Register the types from this module so they can be imported into
-                // other modules.
+                // Register module sources for an easier access later.
+                self.module_sources
+                    .insert(name.clone(), (code.clone(), LineNumbers::new(&code)));
+
+                // Register the types from this module so they can be
+                // imported into other modules.
                 self.module_types
                     .insert(name.clone(), ast.type_info.clone());
+
+                // Register function definitions & data-types for easier access later.
+                ast.register_definitions(&mut self.functions, &mut self.data_types);
 
                 let checked_module = CheckedModule {
                     kind,
@@ -675,10 +763,9 @@ where
         verbose: bool,
         match_tests: Option<Vec<String>>,
         exact_match: bool,
-        tracing: bool,
-    ) -> Result<Vec<Script>, Error> {
+        tracing: Tracing,
+    ) -> Result<Vec<Test>, Error> {
         let mut scripts = Vec::new();
-        let mut testable_validators = Vec::new();
 
         let match_tests = match_tests.map(|mt| {
             mt.into_iter()
@@ -710,161 +797,86 @@ where
             }
 
             for def in checked_module.ast.definitions() {
-                match def {
-                    Definition::Validator(Validator {
-                        params,
-                        fun,
-                        other_fun,
-                        ..
-                    }) => {
-                        let mut fun = fun.clone();
+                if let Definition::Test(func) = def {
+                    if let Some(match_tests) = &match_tests {
+                        let is_match = match_tests.iter().any(|(module, names)| {
+                            let matched_module =
+                                module.is_empty() || checked_module.name.contains(module);
 
-                        fun.arguments = params.clone().into_iter().chain(fun.arguments).collect();
+                            let matched_name = match names {
+                                None => true,
+                                Some(names) => names.iter().any(|name| {
+                                    if exact_match {
+                                        name == &func.name
+                                    } else {
+                                        func.name.contains(name)
+                                    }
+                                }),
+                            };
 
-                        testable_validators.push((&checked_module.name, fun));
+                            matched_module && matched_name
+                        });
 
-                        if let Some(other) = other_fun {
-                            let mut other = other.clone();
-
-                            other.arguments =
-                                params.clone().into_iter().chain(other.arguments).collect();
-
-                            testable_validators.push((&checked_module.name, other));
-                        }
-                    }
-                    Definition::Test(func) => {
-                        if let Some(match_tests) = &match_tests {
-                            let is_match = match_tests.iter().any(|(module, names)| {
-                                let matched_module =
-                                    module.is_empty() || checked_module.name.contains(module);
-
-                                let matched_name = match names {
-                                    None => true,
-                                    Some(names) => names.iter().any(|name| {
-                                        if exact_match {
-                                            name == &func.name
-                                        } else {
-                                            func.name.contains(name)
-                                        }
-                                    }),
-                                };
-
-                                matched_module && matched_name
-                            });
-
-                            if is_match {
-                                scripts.push((
-                                    checked_module.input_path.clone(),
-                                    checked_module.name.clone(),
-                                    func,
-                                ))
-                            }
-                        } else {
+                        if is_match {
                             scripts.push((
                                 checked_module.input_path.clone(),
                                 checked_module.name.clone(),
                                 func,
                             ))
                         }
+                    } else {
+                        scripts.push((
+                            checked_module.input_path.clone(),
+                            checked_module.name.clone(),
+                            func,
+                        ))
                     }
-                    _ => (),
                 }
             }
         }
 
-        let mut programs = Vec::new();
+        let mut generator = self.new_generator(tracing);
 
-        let mut generator = self.checked_modules.new_generator(
-            &self.functions,
-            &self.data_types,
-            &self.module_types,
-            tracing,
-        );
+        let mut tests = Vec::new();
 
-        for (module_name, testable_validator) in &testable_validators {
-            generator.insert_function(
-                module_name.to_string(),
-                testable_validator.name.clone(),
-                String::new(),
-                testable_validator,
-            );
-        }
-
-        for (input_path, module_name, func_def) in scripts {
-            let Function {
-                name,
-                body,
-                can_error,
-                ..
-            } = func_def;
-
+        for (input_path, module_name, test) in scripts.into_iter() {
             if verbose {
                 self.event_listener.handle_event(Event::GeneratingUPLCFor {
-                    name: name.clone(),
+                    name: test.name.clone(),
                     path: input_path.clone(),
                 })
             }
 
-            let evaluation_hint = func_def.test_hint().map(|(bin_op, left_src, right_src)| {
-                let left = generator
-                    .clone()
-                    .generate_test(&left_src)
-                    .try_into()
-                    .unwrap();
-
-                let right = generator
-                    .clone()
-                    .generate_test(&right_src)
-                    .try_into()
-                    .unwrap();
-
-                EvalHint {
-                    bin_op,
-                    left,
-                    right,
-                }
-            });
-
-            let program = generator.generate_test(body);
-
-            let script = Script::new(
-                input_path,
+            tests.push(Test::from_function_definition(
+                &mut generator,
+                test.to_owned(),
                 module_name,
-                name.to_string(),
-                *can_error,
-                program.try_into().unwrap(),
-                evaluation_hint,
-            );
-
-            programs.push(script);
+                input_path,
+            ));
         }
 
-        Ok(programs)
+        Ok(tests)
     }
 
-    fn eval_scripts(&self, scripts: Vec<Script>) -> Vec<EvalInfo> {
+    fn run_tests(
+        &self,
+        tests: Vec<Test>,
+        seed: u32,
+        property_max_success: usize,
+    ) -> Vec<TestResult<UntypedExpr, UntypedExpr>> {
         use rayon::prelude::*;
 
-        // TODO: in the future we probably just want to be able to
-        // tell the machine to not explode on budget consumption.
-        let initial_budget = ExBudget {
-            mem: i64::MAX,
-            cpu: i64::MAX,
-        };
+        let data_types = utils::indexmap::as_ref_values(&self.data_types);
 
-        scripts
+        tests
             .into_par_iter()
-            .map(|script| {
-                let mut eval_result = script.program.clone().eval(initial_budget);
-
-                EvalInfo {
-                    success: !eval_result.failed(script.can_error),
-                    script,
-                    spent_budget: eval_result.cost(),
-                    logs: eval_result.logs(),
-                    output: eval_result.result().ok(),
-                }
+            .map(|test| match test {
+                Test::UnitTest(unit_test) => unit_test.run(),
+                Test::PropertyTest(property_test) => property_test.run(seed, property_max_success),
             })
+            .collect::<Vec<TestResult<(Constant, Rc<Type>), PlutusData>>>()
+            .into_iter()
+            .map(|test| test.reify(&data_types))
             .collect()
     }
 
@@ -928,7 +940,7 @@ fn is_aiken_path(path: &Path, dir: impl AsRef<Path>) -> bool {
     use regex::Regex;
 
     let re = Regex::new(&format!(
-        "^({module}{slash})*{module}\\.ak$",
+        "^({module}{slash})*{module}(\\.[-_a-z0-9]*)*\\.ak$",
         module = "[a-z][-_a-z0-9]*",
         slash = "(/|\\\\)",
     ))

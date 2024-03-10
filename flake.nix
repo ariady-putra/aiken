@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
@@ -15,7 +15,9 @@
 
         osxDependencies = with pkgs;
           lib.optionals stdenv.isDarwin
-          [ darwin.apple_sdk.frameworks.Security ];
+          [ darwin.apple_sdk.frameworks.Security
+            darwin.apple_sdk.frameworks.CoreServices
+          ];
 
         cargoTomlContents = builtins.readFile ./crates/aiken/Cargo.toml;
         version = (builtins.fromTOML cargoTomlContents).package.version;
@@ -34,11 +36,11 @@
 
           GIT_COMMIT_HASH_SHORT = self.shortRev or "unknown";
           postPatch = ''
-            substituteInPlace crates/aiken/src/cmd/mod.rs \
+            substituteInPlace crates/aiken-project/src/config.rs \
               --replace  "built_info::GIT_COMMIT_HASH_SHORT" \
               "Some(\"$GIT_COMMIT_HASH_SHORT\")"
           '';
-          
+
           postInstall = ''
             mkdir -p $out/share/zsh/site-functions
             $out/bin/aiken completion zsh > $out/share/zsh/site-functions/_aiken

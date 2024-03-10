@@ -1,13 +1,12 @@
 use std::{collections::VecDeque, mem::size_of, ops::Deref, rc::Rc};
 
-use num_bigint::BigInt;
-use num_traits::Signed;
-use pallas_primitives::babbage::{self as pallas, PlutusData};
-
 use crate::{
     ast::{Constant, NamedDeBruijn, Term, Type},
     builtins::DefaultFunction,
 };
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive, Zero};
+use pallas::ledger::primitives::babbage::{self, PlutusData};
 
 use super::{runtime::BuiltinRuntime, Error};
 
@@ -386,32 +385,46 @@ impl TryFrom<&Value> for Constant {
     }
 }
 
-fn integer_log2(i: BigInt) -> i64 {
+pub fn integer_log2(i: BigInt) -> i64 {
+    if i.is_zero() {
+        return 0;
+    }
+
     let (_, bytes) = i.to_bytes_be();
+
     match bytes.first() {
         None => unreachable!("empty number?"),
         Some(u) => (8 - u.leading_zeros() - 1) as i64 + 8 * (bytes.len() - 1) as i64,
     }
 }
 
-pub fn from_pallas_bigint(n: &pallas::BigInt) -> BigInt {
+pub fn from_pallas_bigint(n: &babbage::BigInt) -> BigInt {
     match n {
-        pallas::BigInt::Int(i) => i128::from(*i).into(),
-        pallas::BigInt::BigUInt(bytes) => BigInt::from_bytes_be(num_bigint::Sign::Plus, bytes),
-        pallas::BigInt::BigNInt(bytes) => BigInt::from_bytes_be(num_bigint::Sign::Minus, bytes),
+        babbage::BigInt::Int(i) => i128::from(*i).into(),
+        babbage::BigInt::BigUInt(bytes) => BigInt::from_bytes_be(num_bigint::Sign::Plus, bytes),
+        babbage::BigInt::BigNInt(bytes) => {
+            BigInt::from_bytes_be(num_bigint::Sign::Minus, bytes) - 1
+        }
     }
 }
 
-pub fn to_pallas_bigint(n: &BigInt) -> pallas::BigInt {
-    if let Ok(i) = <&BigInt as TryInto<i64>>::try_into(n) {
-        let pallas_int: pallas_codec::utils::Int = i.into();
-        pallas::BigInt::Int(pallas_int)
-    } else if n.is_positive() {
+pub fn to_pallas_bigint(n: &BigInt) -> babbage::BigInt {
+    if let Some(i) = n.to_i128() {
+        if let Ok(i) = i.try_into() {
+            let pallas_int: pallas::codec::utils::Int = i;
+            return babbage::BigInt::Int(pallas_int);
+        }
+    }
+
+    if n.is_positive() {
         let (_, bytes) = n.to_bytes_be();
-        pallas::BigInt::BigUInt(bytes.into())
+        babbage::BigInt::BigUInt(bytes.into())
     } else {
+        // Note that this would break if n == 0
+        // BUT n == 0 always fits into 64bits and hence would end up in the first branch.
+        let n: BigInt = n + 1;
         let (_, bytes) = n.to_bytes_be();
-        pallas::BigInt::BigNInt(bytes.into())
+        babbage::BigInt::BigNInt(bytes.into())
     }
 }
 
@@ -519,6 +532,7 @@ mod tests {
     #[test]
     fn integer_log2_oracle() {
         // Values come from the Haskell implementation
+        assert_eq!(integer_log2(0.into()), 0);
         assert_eq!(integer_log2(1.into()), 0);
         assert_eq!(integer_log2(42.into()), 5);
         assert_eq!(

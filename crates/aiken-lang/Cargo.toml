@@ -1,15 +1,15 @@
 [package]
 name = "aiken-lang"
 description = "The Aiken compiler"
-version = "1.0.21-alpha"
+version = "1.0.24-alpha"
 edition = "2021"
 repository = "https://github.com/aiken-lang/aiken"
 homepage = "https://github.com/aiken-lang/aiken"
 license = "Apache-2.0"
 authors = [
-  "Lucas Rosa <x@rvcas.dev>",
-  "Kasey White <kwhitemsg@gmail.com>",
-  "KtorZ <matthias.benkort@gmail.com>",
+    "Lucas Rosa <x@rvcas.dev>",
+    "Kasey White <kwhitemsg@gmail.com>",
+    "KtorZ <matthias.benkort@gmail.com>",
 ]
 rust-version = "1.66.1"
 
@@ -21,20 +21,22 @@ itertools = "0.10.5"
 miette = "5.9.0"
 ordinal = "0.3.2"
 owo-colors = { version = "3.5.0", features = ["supports-colors"] }
+pallas.workspace = true
 strum = "0.24.1"
 thiserror = "1.0.39"
 vec1 = "1.10.1"
-uplc = { path = '../uplc', version = "1.0.21-alpha" }
+uplc = { path = '../uplc', version = "1.0.24-alpha" }
 num-bigint = "0.4.3"
 petgraph = "0.6.3"
 blst = "0.3.11"
+serde = { version = "1.0.197", features = ["derive", "rc"] }
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 chumsky = "0.9.2"
 [target.'cfg(target_family="wasm")'.dependencies]
 chumsky = { version = "0.9.2", features = [
-  "ahash",
-  "std",
+    "ahash",
+    "std",
 ], default-features = false }
 
 [dev-dependencies]

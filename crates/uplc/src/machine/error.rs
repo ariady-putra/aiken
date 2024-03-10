@@ -6,7 +6,7 @@ use crate::ast::{NamedDeBruijn, Term, Type};
 
 use super::{ExBudget, Value};
 
-#[derive(thiserror::Error, Debug, miette::Diagnostic)]
+#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
     #[error("Over budget mem: {} & cpu: {}", .0.mem, .0.cpu)]
     OutOfExError(ExBudget),
@@ -40,7 +40,14 @@ pub enum Error {
     NotAConstant(Value),
     #[error("The evaluation never reached a final state")]
     MachineNeverReachedDone,
-
+    #[error("integerToByteString encountered negative size {0}")]
+    IntegerToByteStringNegativeSize(BigInt),
+    #[error("integerToByteString encountered negative input {0}")]
+    IntegerToByteStringNegativeInput(BigInt),
+    #[error("integerToByteString encountered size {0} which is bigger than the max size of {1}")]
+    IntegerToByteStringSizeTooBig(BigInt, i64),
+    #[error("integerToByteString encountered size {0} which is not enough space for {1} bytes")]
+    IntegerToByteStringSizeTooSmall(BigInt, usize),
     #[error("Decoding utf8")]
     Utf8(#[from] FromUtf8Error),
     #[error("Out of Bounds\n\nindex: {}\nbytestring: {}\npossible: 0 - {}", .0, hex::encode(.1), .1.len() - 1)]

@@ -1,9 +1,10 @@
 use crate::{
     ast::{Constant, Program, Term, Type},
     flat::Binder,
-    machine::runtime::Compressable,
+    machine::runtime::{convert_tag_to_constr, Compressable},
+    machine::value::from_pallas_bigint,
 };
-use pallas_primitives::babbage::{Constr, PlutusData};
+use pallas::ledger::primitives::babbage::{Constr, PlutusData};
 use pretty::RcDoc;
 use std::ascii::escape_default;
 
@@ -312,9 +313,15 @@ impl Constant {
     // This feels a little awkward here; not sure if it should be upstreamed to pallas
     fn to_doc_list_plutus_data(data: &PlutusData) -> RcDoc<()> {
         match data {
-            PlutusData::Constr(Constr { tag, fields, .. }) => RcDoc::text("Constr")
+            PlutusData::Constr(Constr {
+                tag,
+                any_constructor,
+                fields,
+            }) => RcDoc::text("Constr")
                 .append(RcDoc::space())
-                .append(RcDoc::as_string(tag))
+                .append(RcDoc::as_string(
+                    convert_tag_to_constr(*tag).unwrap_or_else(|| any_constructor.unwrap()),
+                ))
                 .append(RcDoc::space())
                 .append(RcDoc::text("["))
                 .append(RcDoc::intersperse(
@@ -336,11 +343,9 @@ impl Constant {
                     RcDoc::text(", "),
                 ))
                 .append(RcDoc::text("]")),
-            PlutusData::BigInt(bi) => RcDoc::text("I").append(RcDoc::space()).append(match bi {
-                pallas_primitives::babbage::BigInt::Int(v) => RcDoc::text(v.to_string()),
-                pallas_primitives::babbage::BigInt::BigUInt(v) => RcDoc::text(v.to_string()),
-                pallas_primitives::babbage::BigInt::BigNInt(v) => RcDoc::text(v.to_string()),
-            }),
+            PlutusData::BigInt(bi) => RcDoc::text("I")
+                .append(RcDoc::space())
+                .append(RcDoc::text(from_pallas_bigint(bi).to_string())),
             PlutusData::BoundedBytes(bs) => RcDoc::text("B")
                 .append(RcDoc::space())
                 .append(RcDoc::text("#"))

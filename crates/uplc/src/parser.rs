@@ -4,11 +4,12 @@ use crate::{
     ast::{Constant, Name, Program, Term, Type},
     builtins::DefaultFunction,
     machine::runtime::Compressable,
+    machine::value::to_pallas_bigint,
 };
 
 use interner::Interner;
 use num_bigint::BigInt;
-use pallas_primitives::alonzo::PlutusData;
+use pallas::ledger::primitives::alonzo::PlutusData;
 use peg::{error::ParseError, str::LineCol};
 
 pub mod interner;
@@ -241,17 +242,16 @@ peg::parser! {
 
         rule data() -> PlutusData
           = _* "Constr" _+ t:decimal() _+ fs:plutus_list() {?
-            Ok(PlutusData::Constr(pallas_primitives::babbage::Constr {
-                tag: u64::try_from(t).or(Err("tag"))?,
-                any_constructor: None,
-                fields: fs
-            }))
+            Ok(crate::ast::Data::constr(
+                u64::try_from(t).or(Err("tag"))?,
+                fs,
+            ))
           }
           / _* "Map" _+ kvps:plutus_key_value_pairs() {
-            PlutusData::Map(pallas_codec::utils::KeyValuePairs::Def(kvps))
+            PlutusData::Map(pallas::codec::utils::KeyValuePairs::Def(kvps))
           }
           / _* "List" _+ ls:plutus_list() { PlutusData::Array(ls) }
-          / _* "I" _+ n:number() {? Ok(PlutusData::BigInt(pallas_primitives::babbage::BigInt::Int(i64::try_from(n).or(Err("int"))?.into()))) }
+          / _* "I" _+ n:big_number() { PlutusData::BigInt(to_pallas_bigint(&n)) }
           / _* "B" _+ "#" i:ident()* {?
             Ok(PlutusData::BoundedBytes(
               hex::decode(String::from_iter(i)).or(Err("bytes"))?.into()

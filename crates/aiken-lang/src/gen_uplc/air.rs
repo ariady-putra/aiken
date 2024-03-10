@@ -7,6 +7,23 @@ use crate::{
     tipo::{Type, ValueConstructor},
 };
 
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum ExpectLevel {
+    Full,
+    Items,
+    None,
+}
+
+impl From<bool> for ExpectLevel {
+    fn from(value: bool) -> Self {
+        if value {
+            ExpectLevel::Full
+        } else {
+            ExpectLevel::None
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Air {
     // Primitives
@@ -83,6 +100,7 @@ pub enum Air {
     },
     CastFromData {
         tipo: Rc<Type>,
+        is_expect: bool,
     },
     CastToData {
         tipo: Rc<Type>,
@@ -152,14 +170,14 @@ pub enum Air {
     // Field Access
     FieldsExpose {
         indices: Vec<(usize, String, Rc<Type>)>,
-        check_last_item: bool,
+        is_expect: bool,
     },
     // ListAccess
     ListAccessor {
         tipo: Rc<Type>,
         names: Vec<String>,
         tail: bool,
-        check_last_item: bool,
+        expect_level: ExpectLevel,
     },
     ListExpose {
         tipo: Rc<Type>,
@@ -170,7 +188,7 @@ pub enum Air {
     TupleAccessor {
         names: Vec<String>,
         tipo: Rc<Type>,
-        check_last_item: bool,
+        is_expect: bool,
     },
     // Misc.
     ErrorTerm {

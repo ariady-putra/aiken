@@ -1,37 +1,169 @@
 # Changelog
 
+## v1.0.25-alpha - UNRELEASED
+
+### Added
+
+- **aiken-lang**: Data now has a generic argument that can be used to specify the blueprint type. @KtorZ
+- **aiken-lang**: New types `PRNG` and `Fuzzer` in the prelude. @KtorZ
+- **aiken-lang**: Test definitions now accept an (optional) argument alongside a new keyword `via` to specify fuzzers. @KtorZ
+- **aiken-project**: Property-based testing framework with integrated shrinking and case labelling. @KtorZ
+- **aiken-project**: Unit tests now show assertion operands as Aiken expression instead of raw UPLC . @KtorZ
+- **aiken**: The `check` command now accept an extra arg `--seed` to provide an initial seed for the pseudo-random generator of properties. @KtorZ
+- **uplc**: add `integerToByteString` and `byteStringToInteger` builtins. @rvcas @Microproofs
+- **aiken-lang**: add `integer_to_byte_string` and `byte_string_to_integer` `aiken/builtins`. @rvcas
+- **uplc**: more conformance tests for `integerToByteString` and `byteStringToInteger` along with new ones. @rvcas
+- **aikup**: error message when version is not found. @rvcas
+- **aiken**: support outputting mainnet addresses for validators. @rvcas
+- **aiken-lang**: added serde to CheckedModule to encode modules as cbor. @rvcas
+- **aiken-lang**: Strings can contain a nul byte using the escape sequence `\0`. @KtorZ
+- **aiken**: The `check` command now accept an extra (optional) option `--max-success` to control the number of property-test iterations to perform. @KtorZ
+- **aiken**: The `docs` command now accept an optional flag `--include-dependencies` to include all dependencies in the generated documentation. @KtorZ
+
+### Fixed
+
+- **aiken-lang**: Boolean operators (`||` and `&&`) were (somewhat) left-associative. This is now fixed and changed to right-associativity. @KtorZ
+- **uplc**: `serialise_data` builtin wrongly encoding some larger ints as tagged CBOR bigints, instead of plain integers over 9 bytes. @KtorZ
+- **aiken-project**: Unit tests reports are now inline with the test with less noise. @KtorZ
+- **aiken-lang**: Data deserialization for primitive types (pairs, bools, void) now do full checks on the Data structure. @Microproofs
+- **aiken-lang**: The identity reducer optimization was not removing the identity function before. That is fixed now.@Microproofs
+- **aiken-lang**: Inner opaque types can now be properly destructured by expect and when patterns. @Microproofs
+- **aiken-lang**: A codegen specific name-unique interner is now used to preserve lambda scoping. @Microproofs
+- **aiken-lang**: if there is only one clause we want to present a warning that suggests that a `let` binding should be used instead but only if it's an exhaustive pattern. @rvcas
+- **aiken-lang**: support nested void matching @rvcas
+- **uplc**: fix constr identity (`constr-3.uplc`) conformance test. @rvcas
+- **aiken-lang**: disallow `MLResult` in a type definition. @rvcas
+- **aiken-lang**: reversed deserialization of bls types out of data types. @rvcas
+- **aiken-lang**: validator args unexpectedly unbound causing code gen crashes. @rvcas
+- **aiken-lang**: allow implicitly discarded values when right-hand side unified with `Void`. @KtorZ
+- **aiken-lang**: allow zero arg mutually recursive functions. @Microproofs
+- **aiken-lang**: function aliases now resolved to the module and function name in codegen. @Microproofs
+- **aiken-lang**: fix indentation of pipelines to remain a multiple of the base indent increment. @KtorZ
+- **aiken-lang**: forbid presence of non-serialisable data-types in compound structures like List and Tuple. @KtorZ
+
+### Changed
+
+- **aiken-lang**: Discards will now also type check the validator arguments instead of completely ignoring them. @Microproofs
+- **aiken-lang**: The set of curriable builtins with arguments that occur 3 or more times are now hoisted in scope with the arguments curried. @Microproofs
+- **aiken-lang**: Improved the way the lambda inliner works to prevent unnecessary inlining into functions. @Microproofs
+- **aiken-lang**: Simplifications to the AirTree type in codegen. @Microproofs
+- **aiken-lang**: CONSTR_FIELD_EXPOSER and CONSTR_INDEX_EXPOSER now inline the builtins instead. @Microproofs
+- **aiken-lang**: SubtractInteger with a constant as the second arg is now flipped to addInteger with a negated constant. @Microproofs
+- **aiken-lang**: Validator arguments are now checked per arg instead of after all args are applied. @Microproofs
+- **aiken-project**: remove test definitions from dependency modules. @rvcas
+- **aiken-project**: ignore warnings from dependency modules. @rvcas
+- **aiken-project**: parse sources in parallel, this resulted in a nice speedup. @rvcas
+
+## v1.0.24-alpha - 2024-01-31
+
+### Added
+
+- **aiken**: New aliases for `check` (aiken c) and `build` (aiken b) commands. @Kuly14
+
+### Fixed
+
+- **aiken-lang**: Fixed an issue with expects on lists that used discards. This fixes
+  the validator issues being seen for previously succeeding validators on 1.0.21-alpha. @MicroProofs
+- **aiken-lang**: Out of Span issue is now solved. This also fixes incorrectly selected
+  traces from the wrong module, which in some cases lead to the out of span issue. @MicroProofs
+- **aiken-lang**: Calling head_list on a list of pairs no longer throws a type error. @MicroProofs
+
+## v1.0.23-alpha - 2024-01-24
+
+### Fixed
+
+- **aiken-lang**: Now using correct discard match for constructor field access.
+- **aiken-lang**: The list_access_to_uplc now always returns a lambda wrapped
+  term even with only discards. This fixes an apply error being seen by a few
+  people.
+
+## v1.0.22-alpha - 2024-01-24
+
+### Added
+
+- **aiken**: New `--trace-level` option for the `check` and `build` commands to
+  allow chosing the verbosity level of traces amongst three levels: silent,
+  compact & verbose. @MicroProofs @KtorZ
+- **aiken**: New `--filter-traces` option for the `check` and `build` commands
+  to enable restricting traces with more granularity between user-defined
+- **aiken-lang**: Most builtin errors are now caught and instead catched trace
+  errors are thrown. The exception is BLS primitives.
+
+### Fixed
+
+- **aiken-lang**: Fix flat encoding and decoding of large integer values. @KtorZ
+- **aiken-lang**: Traces should not have following expressions formatted into a
+  block. @rvcas
+- **aiken-lang**: Sequences should not be erased if the sole expression is an
+  assignment. @rvcas
+- **aiken-lang**: Should not be able to assign an assignment to an assignment.
+  @rvcas
+- **aiken-lang**: Should not be able to have an assignment in a logical op
+  chain. @rvcas
+- **aiken**: Ensures that test expected to fail that return `False` are
+  considered to pass & improve error reporting when they fail. @KtorZ
+- **aiken-lang**: Fix generic edge case involving tuples.
+- **aiken**: `aiken new` now uses the current version for the github action.
+- **aiken-lang**: Using the head_list builtin on assoc lists now works.
+
+### Removed
+
+- **aiken**: The options `--keep-traces` (on the `build` command) and
+  `--no-traces` (on the `check` command) have been removed; superseded by the
+  new options. @MicroProofs @KtorZ
+
+> [!TIP]
+>
+> - If you've been using `aiken check --no-traces`, you can recover the old
+>   behavior by doing `aiken check --trace-level silent`.
+> - If you've been using `aiken build --keep-traces`, you can recover the old
+>   behavior by doing `aiken build --trace-level verbose`.
+
 ## v1.0.21-alpha - 2023-12-04
 
 ### Added
 
-- **aiken**: `--watch` flag on the `build`, `check` and `docs` commands to automatically watch and re-execute the command on file changes. @Quantumplation & @KtorZ
+- **aiken**: `--watch` flag on the `build`, `check` and `docs` commands to
+  automatically watch and re-execute the command on file changes.
+  @Quantumplation & @KtorZ
 - acceptance tests 28-30 @MicroProofs
 - **aiken-lang**: expose BLS builtins and types @MicroProofs & @rvcas
-- **aiken-lsp**: implement hover info for tuples, lists, and contructor pattern elements @rvcas
+- **aiken-lsp**: implement hover info for tuples, lists, and contructor pattern
+  elements @rvcas
 - **aiken-lsp**: implement hover on when clause patterns @rvcas
 - **aiken-lsp**: hover support for the optional multi validator fn @rvcas
-- **aiken-lsp**: implement quickfix for "utf8 byte array is valid hex string" warning @rvcas
+- **aiken-lsp**: implement quickfix for "utf8 byte array is valid hex string"
+  warning @rvcas
 - **uplc**: add all BLS builtins and types @MicroProofs & @rvcas
-- **uplc**: add plutus conformance tests from [here](https://github.com/input-output-hk/plutus/tree/master/plutus-conformance/test-cases/uplc/evaluation). @MicroProofs & @rvcas
+- **uplc**: add plutus conformance tests from
+  [here](https://github.com/input-output-hk/plutus/tree/master/plutus-conformance/test-cases/uplc/evaluation).
+  @MicroProofs & @rvcas
 - **uplc**: case and constr cost models @MicroProofs
 
 ### Changed
 
 - **aiken**: update to pallas v0.20.0 @rvcas
-- **aiken-project**: switch blueprint validator tests now uses insta @MicroProofs
+- **aiken-project**: switch blueprint validator tests now uses insta
+  @MicroProofs
 - **aiken-project**: update to pallas v0.20.0 @rvcas
-- **aiken-lang**: use a better algorithm for inlining single occurrences @MicroProofs
+- **aiken-lang**: use a better algorithm for inlining single occurrences
+  @MicroProofs
 - **uplc**: update to pallas v0.20.0 @rvcas
 - **uplc**: remove `flat-rs` crate and use it through pallas_codec instead
 
 ### Fixed
 
-- **aiken-lang**: formatting unable to have newline after expect bool shortcut @rvcas
-- **aiken-lang**: formatter incorrectly erasing blocks in certain situations @rvcas
-- **aiken-lang**: use a distinct warning for discarded let assignments to avoid confusion @rvcas
-- **aiken-lang**: allow spread operator on positional constructor arguments @rvcas
+- **aiken-lang**: formatting unable to have newline after expect bool shortcut
+  @rvcas
+- **aiken-lang**: formatter incorrectly erasing blocks in certain situations
+  @rvcas
+- **aiken-lang**: use a distinct warning for discarded let assignments to avoid
+  confusion @rvcas
+- **aiken-lang**: allow spread operator on positional constructor arguments
+  @rvcas
 - **aiken-lsp**: and/or chains hovering on nested elements not working @rvcas
-- **uplc**: delay typemismatch errors in the machine runtime (caught by conformance tests) @rvcas
+- **uplc**: delay typemismatch errors in the machine runtime (caught by
+  conformance tests) @rvcas
 
 ## v1.0.20-alpha - 2023-10-25
 
@@ -39,7 +171,8 @@
 
 - **aiken-project**: The `plutus.json` blueprint now contains a `compiler.name`
   and `compiler.version` fields.
-- **aiken-prokect**: Added compiler and system information to panic error report.
+- **aiken-prokect**: Added compiler and system information to panic error
+  report.
 - **aiken-lsp**: Added quickfix suggestions for unknown variables, modules and
   constructors.
 

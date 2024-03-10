@@ -1,10 +1,12 @@
 use crate::{
-    ast::{Arg, ArgName, CallArg, Function, ModuleKind, Span, TypedDataType, TypedFunction, UnOp},
+    ast::{
+        Annotation, Arg, ArgName, CallArg, DataTypeKey, Function, FunctionAccessKey, ModuleKind,
+        Span, TypedDataType, TypedFunction, UnOp,
+    },
     expr::TypedExpr,
-    gen_uplc::builder::{DataTypeKey, FunctionAccessKey},
     tipo::{
-        fields::FieldMap, Type, TypeConstructor, TypeInfo, TypeVar, ValueConstructor,
-        ValueConstructorVariant,
+        fields::FieldMap, Type, TypeAliasAnnotation, TypeConstructor, TypeInfo, TypeVar,
+        ValueConstructor, ValueConstructorVariant,
     },
     IdGenerator,
 };
@@ -26,6 +28,8 @@ pub const STRING: &str = "String";
 pub const OPTION: &str = "Option";
 pub const ORDERING: &str = "Ordering";
 pub const REDEEMER_WRAPPER: &str = "RedeemerWrapper";
+pub const PRNG: &str = "PRNG";
+pub const FUZZER: &str = "Fuzzer";
 
 /// Build a prelude that can be injected
 /// into a compiler pipeline
@@ -38,6 +42,7 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
         types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
+        annotations: HashMap::new(),
     };
 
     // Int
@@ -79,22 +84,7 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
     // Bool
     prelude.types_constructors.insert(
         BOOL.to_string(),
-        vec!["True".to_string(), "False".to_string()],
-    );
-
-    prelude.values.insert(
-        "True".to_string(),
-        ValueConstructor::public(
-            bool(),
-            ValueConstructorVariant::Record {
-                module: "".into(),
-                name: "True".to_string(),
-                field_map: None::<FieldMap>,
-                arity: 0,
-                location: Span::empty(),
-                constructors_count: 2,
-            },
-        ),
+        vec!["False".to_string(), "True".to_string()],
     );
 
     prelude.values.insert(
@@ -104,6 +94,21 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
             ValueConstructorVariant::Record {
                 module: "".into(),
                 name: "False".to_string(),
+                field_map: None::<FieldMap>,
+                arity: 0,
+                location: Span::empty(),
+                constructors_count: 2,
+            },
+        ),
+    );
+
+    prelude.values.insert(
+        "True".to_string(),
+        ValueConstructor::public(
+            bool(),
+            ValueConstructorVariant::Record {
+                module: "".into(),
+                name: "True".to_string(),
                 field_map: None::<FieldMap>,
                 arity: 0,
                 location: Span::empty(),
@@ -152,7 +157,7 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
         MILLER_LOOP_RESULT.to_string(),
         TypeConstructor {
             parameters: vec![],
-            tipo: int(),
+            tipo: miller_loop_result(),
             location: Span::empty(),
             module: "".to_string(),
             public: true,
@@ -411,6 +416,90 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
         ),
     );
 
+    // PRNG
+    //
+    // pub type PRNG {
+    //   Seeded { seed: ByteArray, choices: ByteArray }
+    //   Replayed { cursor: Int, choices: ByteArray }
+    // }
+
+    prelude.types.insert(
+        PRNG.to_string(),
+        TypeConstructor {
+            location: Span::empty(),
+            parameters: vec![],
+            tipo: prng(),
+            module: "".to_string(),
+            public: true,
+        },
+    );
+
+    prelude.types_constructors.insert(
+        PRNG.to_string(),
+        vec!["Seeded".to_string(), "Replayed".to_string()],
+    );
+
+    let mut seeded_fields = HashMap::new();
+    seeded_fields.insert("seed".to_string(), (0, Span::empty()));
+    seeded_fields.insert("choices".to_string(), (1, Span::empty()));
+    prelude.values.insert(
+        "Seeded".to_string(),
+        ValueConstructor::public(
+            function(vec![byte_array(), byte_array()], prng()),
+            ValueConstructorVariant::Record {
+                module: "".into(),
+                name: "Seeded".to_string(),
+                field_map: Some(FieldMap {
+                    arity: 2,
+                    fields: seeded_fields,
+                    is_function: false,
+                }),
+                arity: 2,
+                location: Span::empty(),
+                constructors_count: 2,
+            },
+        ),
+    );
+
+    let mut replayed_fields = HashMap::new();
+    replayed_fields.insert("cursor".to_string(), (0, Span::empty()));
+    replayed_fields.insert("choices".to_string(), (1, Span::empty()));
+    prelude.values.insert(
+        "Replayed".to_string(),
+        ValueConstructor::public(
+            function(vec![int(), byte_array()], prng()),
+            ValueConstructorVariant::Record {
+                module: "".into(),
+                name: "Replayed".to_string(),
+                field_map: Some(FieldMap {
+                    arity: 2,
+                    fields: replayed_fields,
+                    is_function: false,
+                }),
+                arity: 2,
+                location: Span::empty(),
+                constructors_count: 2,
+            },
+        ),
+    );
+
+    // Fuzzer
+    //
+    // pub type Fuzzer<a> =
+    //   fn(PRNG) -> Option<(PRNG, a)>
+
+    let fuzzer_value = generic_var(id_gen.next());
+    prelude.types.insert(
+        FUZZER.to_string(),
+        TypeConstructor {
+            location: Span::empty(),
+            parameters: vec![fuzzer_value.clone()],
+            tipo: fuzzer(fuzzer_value),
+            module: "".to_string(),
+            public: true,
+        },
+    );
+
     prelude
 }
 
@@ -423,6 +512,7 @@ pub fn plutus(id_gen: &IdGenerator) -> TypeInfo {
         types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
+        annotations: HashMap::new(),
     };
 
     for builtin in DefaultFunction::iter() {
@@ -771,6 +861,16 @@ pub fn from_default_function(builtin: DefaultFunction, id_gen: &IdGenerator) -> 
 
             (tipo, 2)
         }
+        DefaultFunction::IntegerToByteString => {
+            let tipo = function(vec![bool(), int(), int()], byte_array());
+
+            (tipo, 3)
+        }
+        DefaultFunction::ByteStringToInteger => {
+            let tipo = function(vec![bool(), byte_array()], int());
+
+            (tipo, 2)
+        }
     };
 
     ValueConstructor::public(
@@ -1111,6 +1211,16 @@ pub fn prelude_functions(id_gen: &IdGenerator) -> IndexMap<FunctionAccessKey, Ty
 pub fn prelude_data_types(id_gen: &IdGenerator) -> IndexMap<DataTypeKey, TypedDataType> {
     let mut data_types = IndexMap::new();
 
+    // Data
+    let data_data_type = TypedDataType::data();
+    data_types.insert(
+        DataTypeKey {
+            module_name: "".to_string(),
+            defined_type: "Data".to_string(),
+        },
+        data_data_type,
+    );
+
     // Ordering
     let ordering_data_type = TypedDataType::ordering();
     data_types.insert(
@@ -1119,6 +1229,16 @@ pub fn prelude_data_types(id_gen: &IdGenerator) -> IndexMap<DataTypeKey, TypedDa
             defined_type: "Ordering".to_string(),
         },
         ordering_data_type,
+    );
+
+    // Bool
+    let bool_data_type = TypedDataType::bool();
+    data_types.insert(
+        DataTypeKey {
+            module_name: "".to_string(),
+            defined_type: "Bool".to_string(),
+        },
+        bool_data_type,
     );
 
     // Option
@@ -1131,6 +1251,16 @@ pub fn prelude_data_types(id_gen: &IdGenerator) -> IndexMap<DataTypeKey, TypedDa
         option_data_type,
     );
 
+    // PRNG
+    let prng_data_type = TypedDataType::prng();
+    data_types.insert(
+        DataTypeKey {
+            module_name: "".to_string(),
+            defined_type: "PRNG".to_string(),
+        },
+        prng_data_type,
+    );
+
     data_types
 }
 
@@ -1140,6 +1270,7 @@ pub fn int() -> Rc<Type> {
         name: INT.to_string(),
         module: "".to_string(),
         args: vec![],
+        alias: None,
     })
 }
 
@@ -1149,6 +1280,7 @@ pub fn data() -> Rc<Type> {
         name: DATA.to_string(),
         module: "".to_string(),
         args: vec![],
+        alias: None,
     })
 }
 
@@ -1158,6 +1290,7 @@ pub fn byte_array() -> Rc<Type> {
         public: true,
         name: BYTE_ARRAY.to_string(),
         module: "".to_string(),
+        alias: None,
     })
 }
 
@@ -1167,6 +1300,7 @@ pub fn g1_element() -> Rc<Type> {
         module: "".to_string(),
         name: G1_ELEMENT.to_string(),
         args: vec![],
+        alias: None,
     })
 }
 
@@ -1176,6 +1310,7 @@ pub fn g2_element() -> Rc<Type> {
         module: "".to_string(),
         name: G2_ELEMENT.to_string(),
         args: vec![],
+        alias: None,
     })
 }
 
@@ -1185,11 +1320,12 @@ pub fn miller_loop_result() -> Rc<Type> {
         module: "".to_string(),
         name: MILLER_LOOP_RESULT.to_string(),
         args: vec![],
+        alias: None,
     })
 }
 
 pub fn tuple(elems: Vec<Rc<Type>>) -> Rc<Type> {
-    Rc::new(Type::Tuple { elems })
+    Rc::new(Type::Tuple { elems, alias: None })
 }
 
 pub fn bool() -> Rc<Type> {
@@ -1198,6 +1334,57 @@ pub fn bool() -> Rc<Type> {
         public: true,
         name: BOOL.to_string(),
         module: "".to_string(),
+        alias: None,
+    })
+}
+
+pub fn prng() -> Rc<Type> {
+    Rc::new(Type::App {
+        args: vec![],
+        public: true,
+        name: PRNG.to_string(),
+        module: "".to_string(),
+        alias: None,
+    })
+}
+
+pub fn fuzzer(a: Rc<Type>) -> Rc<Type> {
+    let prng_annotation = Annotation::Constructor {
+        location: Span::empty(),
+        module: None,
+        name: "PRNG".to_string(),
+        arguments: vec![],
+    };
+    Rc::new(Type::Fn {
+        args: vec![prng()],
+        ret: option(tuple(vec![prng(), a])),
+        alias: Some(
+            TypeAliasAnnotation {
+                alias: "Fuzzer".to_string(),
+                parameters: vec!["a".to_string()],
+                annotation: Annotation::Fn {
+                    location: Span::empty(),
+                    arguments: vec![prng_annotation.clone()],
+                    ret: Annotation::Constructor {
+                        location: Span::empty(),
+                        module: None,
+                        name: "Option".to_string(),
+                        arguments: vec![Annotation::Tuple {
+                            location: Span::empty(),
+                            elems: vec![
+                                prng_annotation,
+                                Annotation::Var {
+                                    location: Span::empty(),
+                                    name: "a".to_string(),
+                                },
+                            ],
+                        }],
+                    }
+                    .into(),
+                },
+            }
+            .into(),
+        ),
     })
 }
 
@@ -1207,6 +1394,7 @@ pub fn list(t: Rc<Type>) -> Rc<Type> {
         name: LIST.to_string(),
         module: "".to_string(),
         args: vec![t],
+        alias: None,
     })
 }
 
@@ -1216,6 +1404,7 @@ pub fn string() -> Rc<Type> {
         public: true,
         name: STRING.to_string(),
         module: "".to_string(),
+        alias: None,
     })
 }
 
@@ -1225,6 +1414,7 @@ pub fn void() -> Rc<Type> {
         public: true,
         name: VOID.to_string(),
         module: "".to_string(),
+        alias: None,
     })
 }
 
@@ -1234,6 +1424,7 @@ pub fn option(a: Rc<Type>) -> Rc<Type> {
         name: OPTION.to_string(),
         module: "".to_string(),
         args: vec![a],
+        alias: None,
     })
 }
 
@@ -1243,23 +1434,26 @@ pub fn ordering() -> Rc<Type> {
         name: ORDERING.to_string(),
         module: "".to_string(),
         args: vec![],
+        alias: None,
     })
 }
 
 pub fn function(args: Vec<Rc<Type>>, ret: Rc<Type>) -> Rc<Type> {
-    Rc::new(Type::Fn { ret, args })
+    Rc::new(Type::Fn {
+        ret,
+        args,
+        alias: None,
+    })
 }
 
 pub fn generic_var(id: u64) -> Rc<Type> {
     let tipo = Rc::new(RefCell::new(TypeVar::Generic { id }));
-
-    Rc::new(Type::Var { tipo })
+    Rc::new(Type::Var { tipo, alias: None })
 }
 
 pub fn unbound_var(id: u64) -> Rc<Type> {
     let tipo = Rc::new(RefCell::new(TypeVar::Unbound { id }));
-
-    Rc::new(Type::Var { tipo })
+    Rc::new(Type::Var { tipo, alias: None })
 }
 
 pub fn wrapped_redeemer(redeemer: Rc<Type>) -> Rc<Type> {
@@ -1268,5 +1462,6 @@ pub fn wrapped_redeemer(redeemer: Rc<Type>) -> Rc<Type> {
         module: "".to_string(),
         name: REDEEMER_WRAPPER.to_string(),
         args: vec![redeemer],
+        alias: None,
     })
 }

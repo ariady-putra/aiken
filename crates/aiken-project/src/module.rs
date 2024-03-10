@@ -1,20 +1,15 @@
 use crate::error::Error;
 use aiken_lang::{
     ast::{
-        DataType, Definition, Function, Located, ModuleKind, TypedDataType, TypedFunction,
-        TypedModule, TypedValidator, UntypedModule, Validator,
-    },
-    gen_uplc::{
-        builder::{DataTypeKey, FunctionAccessKey},
-        CodeGenerator,
+        DataType, Definition, Function, Located, ModuleKind, TypedModule, TypedValidator,
+        UntypedModule, Validator,
     },
     parser::extra::{comments_before, Comment, ModuleExtra},
-    tipo::TypeInfo,
 };
-use indexmap::IndexMap;
 use petgraph::{algo, graph::NodeIndex, Direction, Graph};
 use std::{
     collections::{HashMap, HashSet},
+    io,
     ops::{Deref, DerefMut},
     path::PathBuf,
 };
@@ -48,6 +43,10 @@ impl ParsedModule {
 pub struct ParsedModules(HashMap<String, ParsedModule>);
 
 impl ParsedModules {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
     pub fn sequence(&self) -> Result<Vec<String>, Error> {
         let inputs = self
             .0
@@ -109,6 +108,12 @@ impl ParsedModules {
     }
 }
 
+impl Default for ParsedModules {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl From<HashMap<String, ParsedModule>> for ParsedModules {
     fn from(parsed_modules: HashMap<String, ParsedModule>) -> Self {
         ParsedModules(parsed_modules)
@@ -165,7 +170,7 @@ fn find_cycle(
     false
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckedModule {
     pub name: String,
     pub code: String,
@@ -177,6 +182,26 @@ pub struct CheckedModule {
 }
 
 impl CheckedModule {
+    pub fn to_cbor(&self) -> Vec<u8> {
+        let mut module_bytes = vec![];
+
+        ciborium::into_writer(&self, &mut module_bytes)
+            .expect("modules should not fail to serialize");
+
+        module_bytes
+    }
+
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, ciborium::de::Error<io::Error>> {
+        ciborium::from_reader(bytes)
+    }
+
+    pub fn to_cbor_hex(&self) -> (String, Vec<u8>) {
+        let module_bytes = self.to_cbor();
+        let hex_str = hex::encode(&module_bytes);
+
+        (hex_str, module_bytes)
+    }
+
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
         self.ast.find_node(byte_index)
     }
@@ -351,60 +376,6 @@ impl CheckedModules {
         self.0
             .into_values()
             .filter(|module| module.kind.is_validator())
-    }
-
-    pub fn new_generator<'a>(
-        &'a self,
-        builtin_functions: &'a IndexMap<FunctionAccessKey, TypedFunction>,
-        builtin_data_types: &'a IndexMap<DataTypeKey, TypedDataType>,
-        module_types: &'a HashMap<String, TypeInfo>,
-        tracing: bool,
-    ) -> CodeGenerator<'a> {
-        let mut functions = IndexMap::new();
-        for (k, v) in builtin_functions {
-            functions.insert(k.clone(), v);
-        }
-
-        let mut data_types = IndexMap::new();
-        for (k, v) in builtin_data_types {
-            data_types.insert(k.clone(), v);
-        }
-
-        for module in self.values() {
-            for def in module.ast.definitions() {
-                match def {
-                    Definition::Fn(func) => {
-                        functions.insert(
-                            FunctionAccessKey {
-                                module_name: module.name.clone(),
-                                function_name: func.name.clone(),
-                            },
-                            func,
-                        );
-                    }
-                    Definition::DataType(dt) => {
-                        data_types.insert(
-                            DataTypeKey {
-                                module_name: module.name.clone(),
-                                defined_type: dt.name.clone(),
-                            },
-                            dt,
-                        );
-                    }
-
-                    Definition::TypeAlias(_)
-                    | Definition::ModuleConstant(_)
-                    | Definition::Test(_)
-                    | Definition::Validator(_)
-                    | Definition::Use(_) => {}
-                }
-            }
-        }
-
-        let mut module_types_index = IndexMap::new();
-        module_types_index.extend(module_types);
-
-        CodeGenerator::new(functions, data_types, module_types_index, tracing)
     }
 }
 

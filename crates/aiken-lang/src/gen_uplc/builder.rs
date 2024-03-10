@@ -1,7 +1,25 @@
-use std::{collections::HashMap, ops::Deref, rc::Rc};
-
+use super::{
+    air::{Air, ExpectLevel},
+    tree::{AirMsg, AirTree, TreePath},
+};
+use crate::{
+    ast::{
+        AssignmentKind, BinOp, ClauseGuard, Constant, DataTypeKey, FunctionAccessKey, Pattern,
+        Span, TraceLevel, TypedArg, TypedClause, TypedClauseGuard, TypedDataType, TypedPattern,
+        UnOp,
+    },
+    builtins::{bool, data, function, int, list, void},
+    expr::TypedExpr,
+    line_numbers::{LineColumn, LineNumbers},
+    tipo::{
+        check_replaceable_opaque_type, convert_opaque_type, find_and_replace_generics,
+        lookup_data_type_by_tipo, PatternConstructor, Type, ValueConstructor,
+        ValueConstructorVariant,
+    },
+};
 use indexmap::{IndexMap, IndexSet};
-use itertools::Itertools;
+use itertools::{Itertools, Position};
+use std::{collections::HashMap, ops::Deref, rc::Rc};
 use uplc::{
     ast::{Constant as UplcConstant, Name, Term, Type as UplcType},
     builder::{CONSTR_FIELDS_EXPOSER, CONSTR_INDEX_EXPOSER},
@@ -12,23 +30,6 @@ use uplc::{
     },
     Constr, KeyValuePairs, PlutusData,
 };
-
-use crate::{
-    ast::{
-        AssignmentKind, DataType, Pattern, Span, TypedArg, TypedClause, TypedClauseGuard,
-        TypedDataType, TypedPattern,
-    },
-    builtins::{bool, void},
-    expr::TypedExpr,
-    tipo::{PatternConstructor, TypeVar, ValueConstructor, ValueConstructorVariant},
-};
-
-use crate::{
-    ast::{BinOp, ClauseGuard, Constant, UnOp},
-    tipo::Type,
-};
-
-use super::tree::{AirExpression, AirStatement, AirTree, TreePath};
 
 pub type Variant = String;
 
@@ -64,24 +65,13 @@ pub enum HoistableFunction {
     CyclicLink(FunctionAccessKey),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct DataTypeKey {
-    pub module_name: String,
-    pub defined_type: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct FunctionAccessKey {
-    pub module_name: String,
-    pub function_name: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct AssignmentProperties {
     pub value_type: Rc<Type>,
     pub kind: AssignmentKind,
     pub remove_unused: bool,
     pub full_check: bool,
+    pub msg_func: Option<AirMsg>,
 }
 
 #[derive(Clone, Debug)]
@@ -191,7 +181,7 @@ impl ClauseProperties {
 #[derive(Clone, Debug)]
 pub struct CodeGenSpecialFuncs {
     pub used_funcs: Vec<String>,
-    pub key_to_func: IndexMap<String, Term<Name>>,
+    pub key_to_func: IndexMap<String, (Term<Name>, Rc<Type>)>,
 }
 
 impl CodeGenSpecialFuncs {
@@ -200,46 +190,22 @@ impl CodeGenSpecialFuncs {
 
         key_to_func.insert(
             CONSTR_FIELDS_EXPOSER.to_string(),
-            Term::snd_pair()
-                .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
-                .lambda("__constr_var"),
+            (
+                Term::snd_pair()
+                    .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
+                    .lambda("__constr_var"),
+                function(vec![data()], list(data())),
+            ),
         );
 
         key_to_func.insert(
             CONSTR_INDEX_EXPOSER.to_string(),
-            Term::fst_pair()
-                .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
-                .lambda("__constr_var"),
-        );
-
-        key_to_func.insert(
-            TOO_MANY_ITEMS.to_string(),
-            Term::string("List/Tuple/Constr contains more items than expected"),
-        );
-
-        key_to_func.insert(
-            LIST_NOT_EMPTY.to_string(),
-            Term::string("Expected no items for List"),
-        );
-
-        key_to_func.insert(
-            CONSTR_NOT_EMPTY.to_string(),
-            Term::string("Expected no fields for Constr"),
-        );
-
-        key_to_func.insert(
-            INCORRECT_BOOLEAN.to_string(),
-            Term::string("Expected on incorrect Boolean variant"),
-        );
-
-        key_to_func.insert(
-            INCORRECT_CONSTR.to_string(),
-            Term::string("Expected on incorrect Constr variant"),
-        );
-
-        key_to_func.insert(
-            CONSTR_INDEX_MISMATCH.to_string(),
-            Term::string("Constr index didn't match a type variant"),
+            (
+                Term::fst_pair()
+                    .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
+                    .lambda("__constr_var"),
+                function(vec![data()], int()),
+            ),
         );
 
         CodeGenSpecialFuncs {
@@ -248,15 +214,34 @@ impl CodeGenSpecialFuncs {
         }
     }
 
-    pub fn use_function(&mut self, func_name: &'static str) -> &'static str {
-        if !self.used_funcs.contains(&func_name.to_string()) {
+    pub fn use_function_tree(&mut self, func_name: String) -> AirTree {
+        if !self.used_funcs.contains(&func_name) {
             self.used_funcs.push(func_name.to_string());
         }
+
+        let tipo = self.key_to_func.get(&func_name).unwrap().1.clone();
+
+        AirTree::local_var(func_name, tipo)
+    }
+
+    pub fn use_function_msg(&mut self, func_name: String) -> AirMsg {
+        if !self.used_funcs.contains(&func_name) {
+            self.used_funcs.push(func_name.to_string());
+        }
+
+        AirMsg::LocalVar(func_name)
+    }
+
+    pub fn use_function_uplc(&mut self, func_name: String) -> String {
+        if !self.used_funcs.contains(&func_name) {
+            self.used_funcs.push(func_name.to_string());
+        }
+
         func_name
     }
 
     pub fn get_function(&self, func_name: &String) -> Term<Name> {
-        self.key_to_func[func_name].clone()
+        self.key_to_func[func_name].0.clone()
     }
 
     pub fn apply_used_functions(&self, mut term: Term<Name>) -> Term<Name> {
@@ -265,239 +250,23 @@ impl CodeGenSpecialFuncs {
         }
         term
     }
+
+    pub fn insert_new_function(
+        &mut self,
+        func_name: String,
+        function: Term<Name>,
+        function_type: Rc<Type>,
+    ) {
+        if !self.key_to_func.contains_key(&func_name) {
+            self.key_to_func
+                .insert(func_name, (function, function_type));
+        }
+    }
 }
 
 impl Default for CodeGenSpecialFuncs {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-pub fn get_generic_id_and_type(tipo: &Type, param: &Type) -> Vec<(u64, Rc<Type>)> {
-    let mut generics_ids = vec![];
-
-    if let Some(id) = tipo.get_generic() {
-        generics_ids.push((id, param.clone().into()));
-        return generics_ids;
-    }
-
-    for (tipo, param_type) in tipo
-        .get_inner_types()
-        .iter()
-        .zip(param.get_inner_types().iter())
-    {
-        generics_ids.append(&mut get_generic_id_and_type(tipo, param_type));
-    }
-    generics_ids
-}
-
-pub fn lookup_data_type_by_tipo(
-    data_types: &IndexMap<DataTypeKey, &TypedDataType>,
-    tipo: &Type,
-) -> Option<DataType<Rc<Type>>> {
-    match tipo {
-        Type::Fn { ret, .. } => match ret.as_ref() {
-            Type::App { module, name, .. } => {
-                let data_type_key = DataTypeKey {
-                    module_name: module.clone(),
-                    defined_type: name.clone(),
-                };
-                data_types.get(&data_type_key).map(|item| (*item).clone())
-            }
-            _ => None,
-        },
-        Type::App { module, name, .. } => {
-            let data_type_key = DataTypeKey {
-                module_name: module.clone(),
-                defined_type: name.clone(),
-            };
-
-            data_types.get(&data_type_key).map(|item| (*item).clone())
-        }
-        Type::Var { tipo } => {
-            if let TypeVar::Link { tipo } = &*tipo.borrow() {
-                lookup_data_type_by_tipo(data_types, tipo)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-pub fn get_arg_type_name(tipo: &Type) -> String {
-    match tipo {
-        Type::App { name, args, .. } => {
-            let inner_args = args.iter().map(|arg| get_arg_type_name(arg)).collect_vec();
-            format!("{}_{}", name, inner_args.join("_"))
-        }
-        Type::Var { tipo } => match tipo.borrow().clone() {
-            TypeVar::Link { tipo } => get_arg_type_name(tipo.as_ref()),
-            _ => unreachable!(),
-        },
-        Type::Tuple { elems } => {
-            let inner_args = elems.iter().map(|arg| get_arg_type_name(arg)).collect_vec();
-            inner_args.join("_")
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub fn convert_opaque_type(
-    t: &Rc<Type>,
-    data_types: &IndexMap<DataTypeKey, &TypedDataType>,
-) -> Rc<Type> {
-    if check_replaceable_opaque_type(t, data_types) && matches!(t.as_ref(), Type::App { .. }) {
-        let data_type = lookup_data_type_by_tipo(data_types, t).unwrap();
-        let new_type_fields = data_type.typed_parameters;
-
-        let mut mono_type_vec = vec![];
-
-        for (tipo, param) in new_type_fields.iter().zip(t.arg_types().unwrap()) {
-            mono_type_vec.append(&mut get_generic_id_and_type(tipo, &param));
-        }
-        let mono_types = mono_type_vec.into_iter().collect();
-
-        let generic_type = &data_type.constructors[0].arguments[0].tipo;
-
-        let mono_type = find_and_replace_generics(generic_type, &mono_types);
-
-        convert_opaque_type(&mono_type, data_types)
-    } else {
-        match t.as_ref() {
-            Type::App {
-                public,
-                module,
-                name,
-                args,
-            } => {
-                let mut new_args = vec![];
-                for arg in args {
-                    let arg = convert_opaque_type(arg, data_types);
-                    new_args.push(arg);
-                }
-                Type::App {
-                    public: *public,
-                    module: module.clone(),
-                    name: name.clone(),
-                    args: new_args,
-                }
-                .into()
-            }
-            Type::Fn { args, ret } => {
-                let mut new_args = vec![];
-                for arg in args {
-                    let arg = convert_opaque_type(arg, data_types);
-                    new_args.push(arg);
-                }
-
-                let ret = convert_opaque_type(ret, data_types);
-
-                Type::Fn {
-                    args: new_args,
-                    ret,
-                }
-                .into()
-            }
-            Type::Var { tipo: var_tipo } => {
-                if let TypeVar::Link { tipo } = &var_tipo.borrow().clone() {
-                    convert_opaque_type(tipo, data_types)
-                } else {
-                    t.clone()
-                }
-            }
-            Type::Tuple { elems } => {
-                let mut new_elems = vec![];
-                for arg in elems {
-                    let arg = convert_opaque_type(arg, data_types);
-                    new_elems.push(arg);
-                }
-                Type::Tuple { elems: new_elems }.into()
-            }
-        }
-    }
-}
-
-pub fn check_replaceable_opaque_type(
-    t: &Rc<Type>,
-    data_types: &IndexMap<DataTypeKey, &TypedDataType>,
-) -> bool {
-    let data_type = lookup_data_type_by_tipo(data_types, t);
-
-    if let Some(data_type) = data_type {
-        assert!(!data_type.constructors.is_empty());
-        let data_type_args = &data_type.constructors[0].arguments;
-        data_type_args.len() == 1 && data_type.opaque && data_type.constructors.len() == 1
-    } else {
-        false
-    }
-}
-
-pub fn find_and_replace_generics(
-    tipo: &Rc<Type>,
-    mono_types: &IndexMap<u64, Rc<Type>>,
-) -> Rc<Type> {
-    if let Some(id) = tipo.get_generic() {
-        // If a generic does not have a type we know of
-        // like a None in option then just use same type
-        mono_types.get(&id).unwrap_or(tipo).clone()
-    } else if tipo.is_generic() {
-        match &**tipo {
-            Type::App {
-                args,
-                public,
-                module,
-                name,
-            } => {
-                let mut new_args = vec![];
-                for arg in args {
-                    let arg = find_and_replace_generics(arg, mono_types);
-                    new_args.push(arg);
-                }
-                let t = Type::App {
-                    args: new_args,
-                    public: *public,
-                    module: module.clone(),
-                    name: name.clone(),
-                };
-                t.into()
-            }
-            Type::Fn { args, ret } => {
-                let mut new_args = vec![];
-                for arg in args {
-                    let arg = find_and_replace_generics(arg, mono_types);
-                    new_args.push(arg);
-                }
-
-                let ret = find_and_replace_generics(ret, mono_types);
-
-                let t = Type::Fn {
-                    args: new_args,
-                    ret,
-                };
-
-                t.into()
-            }
-            Type::Tuple { elems } => {
-                let mut new_elems = vec![];
-                for elem in elems {
-                    let elem = find_and_replace_generics(elem, mono_types);
-                    new_elems.push(elem);
-                }
-                let t = Type::Tuple { elems: new_elems };
-                t.into()
-            }
-            Type::Var { tipo: var_tipo } => {
-                let var_type = var_tipo.as_ref().borrow().clone();
-
-                match var_type {
-                    TypeVar::Link { tipo } => find_and_replace_generics(&tipo, mono_types),
-                    TypeVar::Generic { .. } | TypeVar::Unbound { .. } => unreachable!(),
-                }
-            }
-        }
-    } else {
-        tipo.clone()
     }
 }
 
@@ -570,7 +339,7 @@ pub fn handle_clause_guard(clause_guard: &TypedClauseGuard) -> AirTree {
     }
 }
 
-pub fn get_variant_name(t: &Rc<Type>) -> String {
+pub fn get_generic_variant_name(t: &Rc<Type>) -> String {
     if t.is_string() {
         "_string".to_string()
     } else if t.is_int() {
@@ -586,27 +355,13 @@ pub fn get_variant_name(t: &Rc<Type>) -> String {
     } else if t.is_ml_result() {
         "_ml_result".to_string()
     } else if t.is_map() {
-        let mut full_type = vec!["_map".to_string()];
-        let pair_type = &t.get_inner_types()[0];
-        let fst_type = &pair_type.get_inner_types()[0];
-        let snd_type = &pair_type.get_inner_types()[1];
-        full_type.push(get_variant_name(fst_type));
-        full_type.push(get_variant_name(snd_type));
-        full_type.join("")
+        "_map".to_string()
+    } else if t.is_2_tuple() {
+        "_pair".to_string()
     } else if t.is_list() {
-        let full_type = "_list".to_string();
-        let list_type = &t.get_inner_types()[0];
-
-        format!("{}{}", full_type, get_variant_name(list_type))
+        "_list".to_string()
     } else if t.is_tuple() {
-        let mut full_type = vec!["_tuple".to_string()];
-
-        let inner_types = t.get_inner_types();
-
-        for arg_type in inner_types {
-            full_type.push(get_variant_name(&arg_type));
-        }
-        full_type.join("")
+        "_tuple".to_string()
     } else if t.is_unbound() {
         "_unbound".to_string()
     } else {
@@ -630,15 +385,15 @@ pub fn monomorphize(air_tree: &mut AirTree, mono_types: &IndexMap<u64, Rc<Type>>
 
 pub fn erase_opaque_type_operations(
     air_tree: &mut AirTree,
-    data_types: &IndexMap<DataTypeKey, &TypedDataType>,
+    data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
 ) {
-    if let AirTree::Expression(AirExpression::Constr { tipo, args, .. }) = air_tree {
+    if let AirTree::Constr { tipo, args, .. } = air_tree {
         if check_replaceable_opaque_type(tipo, data_types) {
             let arg = args.pop().unwrap();
-            if let AirTree::Expression(AirExpression::CastToData { value, .. }) = arg {
-                *air_tree = *value;
-            } else {
-                *air_tree = arg;
+
+            match arg {
+                AirTree::CastToData { value, .. } => *air_tree = *value,
+                _ => *air_tree = arg,
             }
         }
     }
@@ -646,36 +401,22 @@ pub fn erase_opaque_type_operations(
     let mut held_types = air_tree.mut_held_types();
 
     while let Some(tipo) = held_types.pop() {
-        *tipo = convert_opaque_type(tipo, data_types);
+        *tipo = convert_opaque_type(tipo, data_types, true);
     }
 }
 
 /// Determine whether this air_tree node introduces any shadowing over `potential_matches`
 pub fn find_introduced_variables(air_tree: &AirTree) -> Vec<String> {
     match air_tree {
-        AirTree::Statement {
-            statement: AirStatement::Let { name, .. },
-            ..
-        } => vec![name.clone()],
-        AirTree::Statement {
-            statement: AirStatement::TupleGuard { indices, .. },
-            ..
+        AirTree::Let { name, .. } => vec![name.clone()],
+        AirTree::TupleGuard { indices, .. } | AirTree::TupleClause { indices, .. } => {
+            indices.iter().map(|(_, name)| name.clone()).collect()
         }
-        | AirTree::Expression(AirExpression::TupleClause { indices, .. }) => {
-            indices.iter().map(|(_, name)| name).cloned().collect()
-        }
-        AirTree::Expression(AirExpression::Fn { params, .. }) => params.to_vec(),
-        AirTree::Statement {
-            statement: AirStatement::ListAccessor { names, .. },
-            ..
-        } => names.clone(),
-        AirTree::Statement {
-            statement:
-                AirStatement::ListExpose {
-                    tail,
-                    tail_head_names,
-                    ..
-                },
+        AirTree::Fn { params, .. } => params.to_vec(),
+        AirTree::ListAccessor { names, .. } => names.clone(),
+        AirTree::ListExpose {
+            tail,
+            tail_head_names,
             ..
         } => {
             let mut ret = vec![];
@@ -688,14 +429,11 @@ pub fn find_introduced_variables(air_tree: &AirTree) -> Vec<String> {
             }
             ret
         }
-        AirTree::Statement {
-            statement: AirStatement::TupleAccessor { names, .. },
-            ..
-        } => names.clone(),
-        AirTree::Statement {
-            statement: AirStatement::FieldsExpose { indices, .. },
-            ..
-        } => indices.iter().map(|(_, name, _)| name).cloned().collect(),
+        AirTree::TupleAccessor { names, .. } => names.clone(),
+        AirTree::FieldsExpose { indices, .. } => {
+            indices.iter().map(|(_, name, _)| name.clone()).collect()
+        }
+        AirTree::When { subject_name, .. } => vec![subject_name.clone()],
         _ => vec![],
     }
 }
@@ -706,8 +444,8 @@ pub fn is_recursive_function_call<'a>(
     func_key: &FunctionAccessKey,
     variant: &String,
 ) -> (bool, Option<&'a Vec<AirTree>>) {
-    if let AirTree::Expression(AirExpression::Call { func, args, .. }) = air_tree {
-        if let AirTree::Expression(AirExpression::Var {
+    if let AirTree::Call { func, args, .. } = air_tree {
+        if let AirTree::Var {
             constructor:
                 ValueConstructor {
                     variant: ValueConstructorVariant::ModuleFn { name, module, .. },
@@ -715,7 +453,7 @@ pub fn is_recursive_function_call<'a>(
                 },
             variant_name,
             ..
-        }) = func.as_ref()
+        } = func.as_ref()
         {
             if name == &func_key.function_name
                 && module == &func_key.module_name
@@ -756,7 +494,7 @@ pub fn identify_recursive_static_params(
                 // - a variable with the same name, but that was shadowed in an ancestor scope
                 // - any other type of expression
                 let param_is_different = match arg {
-                    AirTree::Expression(AirExpression::Var { name, .. }) => {
+                    AirTree::Var { name, .. } => {
                         // "shadowed in an ancestor scope" means "the definition scope is a prefix of our scope"
                         name != param
                             || if let Some(p) = shadowed_parameters.get(param) {
@@ -814,8 +552,8 @@ pub fn modify_self_calls(
     // Modify any self calls to remove recursive static parameters and append `self` as a parameter for the recursion
     body.traverse_tree_with(
         &mut |air_tree: &mut AirTree, _| {
-            if let AirTree::Expression(AirExpression::Call { func, args, .. }) = air_tree {
-                if let AirTree::Expression(AirExpression::Var {
+            if let AirTree::Call { func, args, .. } = air_tree {
+                if let AirTree::Var {
                     constructor:
                         ValueConstructor {
                             variant: ValueConstructorVariant::ModuleFn { name, module, .. },
@@ -823,7 +561,7 @@ pub fn modify_self_calls(
                         },
                     variant_name,
                     ..
-                }) = func.as_ref()
+                } = func.as_ref()
                 {
                     if name == &func_key.function_name
                         && module == &func_key.module_name
@@ -862,7 +600,7 @@ pub fn modify_cyclic_calls(
 ) {
     body.traverse_tree_with(
         &mut |air_tree: &mut AirTree, _| {
-            if let AirTree::Expression(AirExpression::Var {
+            if let AirTree::Var {
                 constructor:
                     ValueConstructor {
                         variant: ValueConstructorVariant::ModuleFn { name, module, .. },
@@ -871,7 +609,7 @@ pub fn modify_cyclic_calls(
                     },
                 variant_name,
                 ..
-            }) = air_tree
+            } = air_tree
             {
                 let tipo = tipo.clone();
                 let var_key = FunctionAccessKey {
@@ -928,7 +666,7 @@ pub fn modify_cyclic_calls(
 
 pub fn pattern_has_conditions(
     pattern: &TypedPattern,
-    data_types: &IndexMap<DataTypeKey, &TypedDataType>,
+    data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
 ) -> bool {
     match pattern {
         Pattern::List { .. } | Pattern::Int { .. } => true,
@@ -954,7 +692,7 @@ pub fn pattern_has_conditions(
 // TODO: write some tests
 pub fn rearrange_list_clauses(
     clauses: Vec<TypedClause>,
-    data_types: &IndexMap<DataTypeKey, &TypedDataType>,
+    data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
 ) -> Vec<TypedClause> {
     let mut sorted_clauses = clauses;
 
@@ -1192,16 +930,13 @@ pub fn find_list_clause_or_default_first(clauses: &[TypedClause]) -> &TypedClaus
         .unwrap_or(&clauses[0])
 }
 
-pub fn convert_data_to_type(term: Term<Name>, field_type: &Rc<Type>) -> Term<Name> {
+pub fn known_data_to_type(term: Term<Name>, field_type: &Type) -> Term<Name> {
     if field_type.is_int() {
         Term::un_i_data().apply(term)
     } else if field_type.is_bytearray() {
         Term::un_b_data().apply(term)
     } else if field_type.is_void() {
-        Term::equals_integer()
-            .apply(Term::integer(0.into()))
-            .apply(Term::fst_pair().apply(Term::unconstr_data().apply(term)))
-            .delayed_if_then_else(Term::unit(), Term::Error)
+        Term::unit().lambda("_").apply(term)
     } else if field_type.is_map() {
         Term::unmap_data().apply(term)
     } else if field_type.is_string() {
@@ -1209,21 +944,252 @@ pub fn convert_data_to_type(term: Term<Name>, field_type: &Rc<Type>) -> Term<Nam
     } else if field_type.is_tuple() && matches!(field_type.get_uplc_type(), UplcType::Pair(_, _)) {
         Term::mk_pair_data()
             .apply(Term::head_list().apply(Term::var("__list_data")))
-            .apply(Term::head_list().apply(Term::var("__tail")))
-            .lambda("__tail")
-            .apply(Term::tail_list().apply(Term::var("__list_data")))
+            .apply(Term::head_list().apply(Term::tail_list().apply(Term::var("__list_data"))))
             .lambda("__list_data")
             .apply(Term::unlist_data().apply(term))
     } else if field_type.is_list() || field_type.is_tuple() {
         Term::unlist_data().apply(term)
     } else if field_type.is_bool() {
-        Term::equals_integer()
-            .apply(Term::integer(1.into()))
+        Term::less_than_integer()
+            .apply(Term::integer(0.into()))
             .apply(Term::fst_pair().apply(Term::unconstr_data().apply(term)))
     } else if field_type.is_bls381_12_g1() {
         Term::bls12_381_g1_uncompress().apply(Term::un_b_data().apply(term))
     } else if field_type.is_bls381_12_g2() {
         Term::bls12_381_g2_uncompress().apply(Term::un_b_data().apply(term))
+    } else if field_type.is_ml_result() {
+        panic!("ML Result not supported")
+    } else {
+        term
+    }
+}
+
+pub fn unknown_data_to_type(term: Term<Name>, field_type: &Type) -> Term<Name> {
+    if field_type.is_int() {
+        Term::un_i_data().apply(term)
+    } else if field_type.is_bytearray() {
+        Term::un_b_data().apply(term)
+    } else if field_type.is_void() {
+        Term::equals_integer()
+            .apply(Term::integer(0.into()))
+            .apply(Term::fst_pair().apply(Term::var("__pair__")))
+            .delayed_if_then_else(
+                Term::snd_pair()
+                    .apply(Term::var("__pair__"))
+                    .delayed_choose_list(Term::unit(), Term::Error),
+                Term::Error,
+            )
+            .lambda("__pair__")
+            .apply(Term::unconstr_data().apply(term))
+    } else if field_type.is_map() {
+        Term::unmap_data().apply(term)
+    } else if field_type.is_string() {
+        Term::Builtin(DefaultFunction::DecodeUtf8).apply(Term::un_b_data().apply(term))
+    } else if field_type.is_tuple() && matches!(field_type.get_uplc_type(), UplcType::Pair(_, _)) {
+        Term::tail_list()
+            .apply(Term::tail_list().apply(Term::var("__list_data")))
+            .delayed_choose_list(
+                Term::mk_pair_data()
+                    .apply(Term::head_list().apply(Term::var("__list_data")))
+                    .apply(
+                        Term::head_list().apply(Term::tail_list().apply(Term::var("__list_data"))),
+                    ),
+                Term::Error,
+            )
+            .lambda("__list_data")
+            .apply(Term::unlist_data().apply(term))
+    } else if field_type.is_list() || field_type.is_tuple() {
+        Term::unlist_data().apply(term)
+    } else if field_type.is_bool() {
+        Term::snd_pair()
+            .apply(Term::var("__pair__"))
+            .delayed_choose_list(
+                Term::equals_integer()
+                    .apply(Term::integer(1.into()))
+                    .apply(Term::fst_pair().apply(Term::var("__pair__")))
+                    .delayed_if_then_else(
+                        Term::bool(true),
+                        Term::equals_integer()
+                            .apply(Term::integer(0.into()))
+                            .apply(Term::fst_pair().apply(Term::var("__pair__")))
+                            .delayed_if_then_else(Term::bool(false), Term::Error),
+                    ),
+                Term::Error,
+            )
+            .lambda("__pair__")
+            .apply(Term::unconstr_data().apply(term))
+    } else if field_type.is_bls381_12_g1() {
+        Term::bls12_381_g1_uncompress().apply(Term::un_b_data().apply(term))
+    } else if field_type.is_bls381_12_g2() {
+        Term::bls12_381_g2_uncompress().apply(Term::un_b_data().apply(term))
+    } else if field_type.is_ml_result() {
+        panic!("ML Result not supported")
+    } else {
+        term
+    }
+}
+
+pub fn unknown_data_to_type_debug(
+    term: Term<Name>,
+    field_type: &Type,
+    error_term: Term<Name>,
+) -> Term<Name> {
+    if field_type.is_int() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                Term::un_i_data().apply(Term::var("__val")),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_bytearray() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                Term::un_b_data().apply(Term::var("__val")),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_void() {
+        Term::var("__val")
+            .delayed_choose_data(
+                Term::equals_integer()
+                    .apply(Term::integer(0.into()))
+                    .apply(Term::fst_pair().apply(Term::unconstr_data().apply(Term::var("__val"))))
+                    .delayed_if_then_else(
+                        Term::snd_pair()
+                            .apply(Term::unconstr_data().apply(Term::var("__val")))
+                            .delayed_choose_list(Term::unit(), error_term.clone()),
+                        error_term.clone(),
+                    ),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_map() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                Term::unmap_data().apply(Term::var("__val")),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_string() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                Term::Builtin(DefaultFunction::DecodeUtf8)
+                    .apply(Term::un_b_data().apply(Term::var("__val"))),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_tuple() && matches!(field_type.get_uplc_type(), UplcType::Pair(_, _)) {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                Term::var("__list_data")
+                    .delayed_choose_list(
+                        error_term.clone(),
+                        Term::var("__tail")
+                            .delayed_choose_list(
+                                error_term.clone(),
+                                Term::tail_list()
+                                    .apply(Term::var("__tail"))
+                                    .delayed_choose_list(
+                                        Term::mk_pair_data()
+                                            .apply(
+                                                Term::head_list().apply(Term::var("__list_data")),
+                                            )
+                                            .apply(Term::head_list().apply(Term::var("__tail"))),
+                                        error_term.clone(),
+                                    ),
+                            )
+                            .lambda("__tail")
+                            .apply(Term::tail_list().apply(Term::var("__list_data"))),
+                    )
+                    .lambda("__list_data")
+                    .apply(Term::unlist_data().apply(Term::var("__val"))),
+                error_term.clone(),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_list() || field_type.is_tuple() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                Term::unlist_data().apply(Term::var("__val")),
+                error_term.clone(),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_bool() {
+        Term::var("__val")
+            .delayed_choose_data(
+                Term::snd_pair()
+                    .apply(Term::var("__pair__"))
+                    .delayed_choose_list(
+                        Term::equals_integer()
+                            .apply(Term::integer(1.into()))
+                            .apply(Term::fst_pair().apply(Term::var("__pair__")))
+                            .delayed_if_then_else(
+                                Term::bool(true),
+                                Term::equals_integer()
+                                    .apply(Term::integer(0.into()))
+                                    .apply(Term::fst_pair().apply(Term::var("__pair__")))
+                                    .delayed_if_then_else(Term::bool(false), error_term.clone()),
+                            ),
+                        error_term.clone(),
+                    )
+                    .lambda("__pair__")
+                    .apply(Term::unconstr_data().apply(Term::var("__val"))),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_bls381_12_g1() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                Term::bls12_381_g1_uncompress().apply(Term::un_b_data().apply(Term::var("__val"))),
+            )
+            .lambda("__val")
+            .apply(term)
+    } else if field_type.is_bls381_12_g2() {
+        Term::var("__val")
+            .delayed_choose_data(
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                Term::bls12_381_g2_uncompress().apply(Term::un_b_data().apply(Term::var("__val"))),
+            )
+            .lambda("__val")
+            .apply(term)
     } else if field_type.is_ml_result() {
         panic!("ML Result not supported")
     } else {
@@ -1237,11 +1203,11 @@ pub fn convert_constants_to_data(constants: Vec<Rc<UplcConstant>>) -> Vec<UplcCo
         let constant = match constant.as_ref() {
             UplcConstant::Integer(i) => UplcConstant::Data(PlutusData::BigInt(to_pallas_bigint(i))),
             UplcConstant::ByteString(b) => {
-                UplcConstant::Data(PlutusData::BoundedBytes(b.clone().try_into().unwrap()))
+                UplcConstant::Data(PlutusData::BoundedBytes(b.clone().into()))
             }
-            UplcConstant::String(s) => UplcConstant::Data(PlutusData::BoundedBytes(
-                s.as_bytes().to_vec().try_into().unwrap(),
-            )),
+            UplcConstant::String(s) => {
+                UplcConstant::Data(PlutusData::BoundedBytes(s.as_bytes().to_vec().into()))
+            }
 
             UplcConstant::Bool(b) => UplcConstant::Data(PlutusData::Constr(Constr {
                 tag: convert_constr_to_tag((*b).into()).unwrap_or(ANY_TAG),
@@ -1371,9 +1337,9 @@ pub fn convert_type_to_data(term: Term<Name>, field_type: &Rc<Type>) -> Term<Nam
             ),
         )
     } else if field_type.is_bls381_12_g1() {
-        Term::bls12_381_g1_compress().apply(Term::b_data().apply(term))
+        Term::b_data().apply(Term::bls12_381_g1_compress().apply(term))
     } else if field_type.is_bls381_12_g2() {
-        Term::bls12_381_g2_compress().apply(Term::b_data().apply(term))
+        Term::b_data().apply(Term::bls12_381_g2_compress().apply(term))
     } else if field_type.is_ml_result() {
         panic!("ML Result not supported")
     } else {
@@ -1381,191 +1347,169 @@ pub fn convert_type_to_data(term: Term<Name>, field_type: &Rc<Type>) -> Term<Nam
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn list_access_to_uplc(
-    names_types: &[(String, Rc<Type>)],
-    id_list: &[u64],
-    tail: bool,
-    current_index: usize,
+    names_types_ids: &[(String, Rc<Type>, u64)],
+    tail_present: bool,
     term: Term<Name>,
-    check_last_item: bool,
     is_list_accessor: bool,
+    expect_level: ExpectLevel,
     error_term: Term<Name>,
 ) -> Term<Name> {
-    if let Some(((first, current_tipo), names_types)) = names_types.split_first() {
-        let head_list =
-            if matches!(current_tipo.get_uplc_type(), UplcType::Pair(_, _)) && is_list_accessor {
-                Term::head_list().apply(Term::var(format!(
-                    "tail_index_{}_{}",
-                    current_index, id_list[current_index]
-                )))
-            } else {
-                convert_data_to_type(
-                    Term::head_list().apply(Term::var(format!(
-                        "tail_index_{}_{}",
-                        current_index, id_list[current_index]
-                    ))),
-                    &current_tipo.to_owned(),
+    let names_len = names_types_ids.len();
+
+    // assert!(!(matches!(expect_level, ExpectLevel::None) && is_list_accessor && !tail_present));
+
+    let mut no_tailing_discards = names_types_ids
+        .iter()
+        .rev()
+        .with_position()
+        .skip_while(|pos| match pos {
+            // Items are reversed order
+            Position::Last((name, _, _)) | Position::Middle((name, _, _)) => {
+                name == "_" && matches!(expect_level, ExpectLevel::None)
+            }
+            Position::First((name, _, _)) | Position::Only((name, _, _)) => {
+                name == "_" && (tail_present || matches!(expect_level, ExpectLevel::None))
+            }
+        })
+        .map(|position| match position {
+            Position::First(a) | Position::Middle(a) | Position::Last(a) | Position::Only(a) => a,
+        })
+        .collect_vec();
+
+    // If is just discards and check_last_item then we check for empty list
+    if no_tailing_discards.is_empty() {
+        if tail_present || matches!(expect_level, ExpectLevel::None) {
+            return term.lambda("_");
+        }
+
+        return Term::var("empty_list")
+            .delayed_choose_list(term, error_term)
+            .lambda("empty_list");
+    }
+
+    // reverse back to original order
+    no_tailing_discards.reverse();
+
+    // If we cut off at least one element then that was tail and possibly some heads
+    let tail_wasnt_cutoff = tail_present && no_tailing_discards.len() == names_len;
+
+    let tail_name = |id| format!("tail_id_{}", id);
+
+    let head_item = |name, tipo: &Rc<Type>, tail_name: &str| {
+        if name == "_" {
+            Term::unit()
+        } else if matches!(tipo.get_uplc_type(), UplcType::Pair(_, _)) && is_list_accessor {
+            Term::head_list().apply(Term::var(tail_name.to_string()))
+        } else if matches!(expect_level, ExpectLevel::Full) {
+            // Expect level is full so we have an unknown piece of data to cast
+            if error_term == Term::Error {
+                unknown_data_to_type(
+                    Term::head_list().apply(Term::var(tail_name.to_string())),
+                    &tipo.to_owned(),
                 )
-            };
-
-        if names_types.len() == 1 && tail {
-            if first == "_" && names_types[0].0 == "_" {
-                term.lambda("_")
-            } else if first == "_" {
-                term.lambda(&names_types[0].0)
-                    .apply(Term::tail_list().apply(Term::var(format!(
-                        "tail_index_{}_{}",
-                        current_index, id_list[current_index]
-                    ))))
-                    .lambda(format!(
-                        "tail_index_{}_{}",
-                        current_index, id_list[current_index]
-                    ))
-            } else if names_types[0].0 == "_" {
-                term.lambda(first).apply(head_list).lambda(format!(
-                    "tail_index_{}_{}",
-                    current_index, id_list[current_index]
-                ))
             } else {
-                term.lambda(&names_types[0].0)
-                    .apply(Term::tail_list().apply(Term::var(format!(
-                        "tail_index_{}_{}",
-                        current_index, id_list[current_index]
-                    ))))
-                    .lambda(first)
-                    .apply(head_list)
-                    .lambda(format!(
-                        "tail_index_{}_{}",
-                        current_index, id_list[current_index]
-                    ))
-            }
-        } else if names_types.is_empty() {
-            if first == "_" {
-                if check_last_item {
-                    Term::tail_list()
-                        .apply(Term::var(format!(
-                            "tail_index_{}_{}",
-                            current_index, id_list[current_index]
-                        )))
-                        .delayed_choose_list(term, error_term)
-                } else {
-                    term
-                }
-                .lambda(if check_last_item {
-                    format!("tail_index_{}_{}", current_index, id_list[current_index])
-                } else {
-                    "_".to_string()
-                })
-            } else {
-                if check_last_item {
-                    Term::tail_list()
-                        .apply(Term::var(format!(
-                            "tail_index_{}_{}",
-                            current_index, id_list[current_index]
-                        )))
-                        .delayed_choose_list(term, error_term)
-                } else {
-                    term
-                }
-                .lambda(first.clone())
-                .apply(head_list)
-                .lambda(format!(
-                    "tail_index_{}_{}",
-                    current_index, id_list[current_index]
-                ))
-            }
-        } else if first == "_" {
-            let mut list_access_inner = list_access_to_uplc(
-                names_types,
-                id_list,
-                tail,
-                current_index + 1,
-                term,
-                check_last_item,
-                is_list_accessor,
-                error_term,
-            );
-
-            list_access_inner = match &list_access_inner {
-                Term::Lambda {
-                    parameter_name,
-                    body,
-                } => {
-                    if &parameter_name.text == "_" {
-                        body.as_ref().clone()
-                    } else {
-                        list_access_inner
-                            .apply(Term::tail_list().apply(Term::var(format!(
-                                "tail_index_{}_{}",
-                                current_index, id_list[current_index]
-                            ))))
-                            .lambda(format!(
-                                "tail_index_{}_{}",
-                                current_index, id_list[current_index]
-                            ))
-                    }
-                }
-                _ => list_access_inner,
-            };
-
-            match &list_access_inner {
-                Term::Lambda { .. } => list_access_inner,
-                _ => list_access_inner.lambda("_"),
+                unknown_data_to_type_debug(
+                    Term::head_list().apply(Term::var(tail_name.to_string())),
+                    &tipo.to_owned(),
+                    error_term.clone(),
+                )
             }
         } else {
-            let mut list_access_inner = list_access_to_uplc(
-                names_types,
-                id_list,
-                tail,
-                current_index + 1,
-                term,
-                check_last_item,
-                is_list_accessor,
-                error_term,
-            );
+            known_data_to_type(
+                Term::head_list().apply(Term::var(tail_name.to_string())),
+                &tipo.to_owned(),
+            )
+        }
+    };
 
-            list_access_inner = match &list_access_inner {
-                Term::Lambda {
-                    parameter_name,
-                    body,
-                } => {
-                    if &parameter_name.text == "_" {
-                        body.as_ref()
-                            .clone()
-                            .lambda(first.clone())
-                            .apply(head_list)
-                            .lambda(format!(
-                                "tail_index_{}_{}",
-                                current_index, id_list[current_index]
-                            ))
-                    } else {
-                        list_access_inner
-                            .apply(Term::tail_list().apply(Term::var(format!(
-                                "tail_index_{}_{}",
-                                current_index, id_list[current_index]
-                            ))))
-                            .lambda(first.clone())
-                            .apply(head_list)
-                            .lambda(format!(
-                                "tail_index_{}_{}",
-                                current_index, id_list[current_index]
-                            ))
+    // Remember we reverse here so the First or Only is the last item
+    no_tailing_discards
+        .into_iter()
+        .rev()
+        .with_position()
+        .fold(term, |acc, position| {
+            match position {
+                Position::First((name, _, _)) | Position::Only((name, _, _))
+                    if tail_wasnt_cutoff =>
+                {
+                    // case for tail as the last item
+                    acc.lambda(name)
+                }
+
+                Position::First((name, tipo, id)) | Position::Only((name, tipo, id)) => {
+                    // case for no tail, but last item
+                    let tail_name = tail_name(id);
+
+                    let head_item = head_item(name, tipo, &tail_name);
+
+                    match expect_level {
+                        ExpectLevel::None => acc.lambda(name).apply(head_item).lambda(tail_name),
+
+                        ExpectLevel::Full | ExpectLevel::Items => {
+                            if error_term == Term::Error && tail_present {
+                                // No need to check last item if tail was present
+                                acc.lambda(name).apply(head_item).lambda(tail_name)
+                            } else if tail_present {
+                                // Custom error instead of trying to do head_item on a possibly empty list.
+                                Term::var(tail_name.to_string())
+                                    .delayed_choose_list(
+                                        error_term.clone(),
+                                        acc.lambda(name).apply(head_item),
+                                    )
+                                    .lambda(tail_name)
+                            } else if error_term == Term::Error {
+                                // Check head is last item in this list
+                                Term::tail_list()
+                                    .apply(Term::var(tail_name.to_string()))
+                                    .delayed_choose_list(acc, error_term.clone())
+                                    .lambda(name)
+                                    .apply(head_item)
+                                    .lambda(tail_name)
+                            } else {
+                                // Custom error if list is not empty after this head
+                                Term::var(tail_name.to_string())
+                                    .delayed_choose_list(
+                                        error_term.clone(),
+                                        Term::tail_list()
+                                            .apply(Term::var(tail_name.to_string()))
+                                            .delayed_choose_list(acc, error_term.clone())
+                                            .lambda(name)
+                                            .apply(head_item),
+                                    )
+                                    .lambda(tail_name)
+                            }
+                        }
                     }
                 }
-                _ => list_access_inner
-                    .lambda(first.clone())
-                    .apply(head_list)
-                    .lambda(format!(
-                        "tail_index_{}_{}",
-                        current_index, id_list[current_index]
-                    )),
-            };
-            list_access_inner
-        }
-    } else {
-        term
-    }
+
+                Position::Middle((name, tipo, id)) | Position::Last((name, tipo, id)) => {
+                    // case for every item except the last item
+                    let tail_name = tail_name(id);
+
+                    let head_item = head_item(name, tipo, &tail_name);
+
+                    if matches!(expect_level, ExpectLevel::None) || error_term == Term::Error {
+                        acc.apply(Term::tail_list().apply(Term::var(tail_name.to_string())))
+                            .lambda(name)
+                            .apply(head_item)
+                            .lambda(tail_name)
+                    } else {
+                        // case for a custom error if the list is empty at this point
+                        Term::var(tail_name.to_string())
+                            .delayed_choose_list(
+                                error_term.clone(),
+                                acc.apply(
+                                    Term::tail_list().apply(Term::var(tail_name.to_string())),
+                                )
+                                .lambda(name)
+                                .apply(head_item),
+                            )
+                            .lambda(tail_name)
+                    }
+                }
+            }
+        })
 }
 
 pub fn apply_builtin_forces(mut term: Term<Name>, force_count: u32) -> Term<Name> {
@@ -1595,7 +1539,7 @@ pub fn undata_builtin(
         term = term.apply(Term::var(temp_var));
     }
 
-    term = convert_data_to_type(term, tipo);
+    term = known_data_to_type(term, tipo);
 
     if count == 0 {
         term = term.lambda(temp_var);
@@ -1647,7 +1591,14 @@ pub fn special_case_builtin(
     mut args: Vec<Term<Name>>,
 ) -> Term<Name> {
     match func {
-        DefaultFunction::IfThenElse
+        DefaultFunction::ChooseUnit if count > 0 => {
+            let term = args.pop().unwrap();
+            let unit = args.pop().unwrap();
+
+            term.lambda("_").apply(unit)
+        }
+        DefaultFunction::ChooseUnit
+        | DefaultFunction::IfThenElse
         | DefaultFunction::ChooseList
         | DefaultFunction::ChooseData
         | DefaultFunction::Trace => {
@@ -1684,16 +1635,6 @@ pub fn special_case_builtin(
 
             term
         }
-        DefaultFunction::ChooseUnit => {
-            if count == 0 {
-                unimplemented!("Honestly, why are you doing this?")
-            } else {
-                let term = args.pop().unwrap();
-                let unit = args.pop().unwrap();
-
-                term.lambda("_").apply(unit)
-            }
-        }
         DefaultFunction::UnConstrData => {
             let mut term: Term<Name> = (*func).into();
 
@@ -1728,52 +1669,12 @@ pub fn special_case_builtin(
 pub fn wrap_as_multi_validator(
     spend: Term<Name>,
     mint: Term<Name>,
-    trace: bool,
+    trace: TraceLevel,
     spend_name: String,
     mint_name: String,
 ) -> Term<Name> {
-    if trace {
-        let trace_string = format!(
-            "Incorrect redeemer type for validator {}. 
-            Double check you have wrapped the redeemer type as specified in your plutus.json",
-            spend_name
-        );
-
-        let error_term = Term::Error.delayed_trace(Term::var("__incorrect_second_arg_type"));
-
-        Term::var("__second_arg")
-            .delayed_choose_data(
-                Term::equals_integer()
-                    .apply(Term::integer(0.into()))
-                    .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var("__second_arg")))
-                    .delayed_if_then_else(
-                        mint.apply(Term::var("__first_arg"))
-                            .apply(Term::var("__second_arg"))
-                            .delayed_trace(Term::string(format!(
-                                "Running 2 arg validator {}",
-                                mint_name
-                            ))),
-                        spend
-                            .apply(Term::var("__first_arg"))
-                            .apply(Term::head_list().apply(
-                                Term::var(CONSTR_FIELDS_EXPOSER).apply(Term::var("__second_arg")),
-                            ))
-                            .delayed_trace(Term::string(format!(
-                                "Running 3 arg validator {}",
-                                spend_name
-                            ))),
-                    ),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term,
-            )
-            .lambda("__incorrect_second_arg_type")
-            .apply(Term::string(trace_string))
-            .lambda("__second_arg")
-            .lambda("__first_arg")
-    } else {
-        Term::equals_integer()
+    match trace {
+        TraceLevel::Silent | TraceLevel::Compact => Term::equals_integer()
             .apply(Term::integer(0.into()))
             .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var("__second_arg")))
             .delayed_if_then_else(
@@ -1785,7 +1686,50 @@ pub fn wrap_as_multi_validator(
                 ),
             )
             .lambda("__second_arg")
-            .lambda("__first_arg")
+            .lambda("__first_arg"),
+        TraceLevel::Verbose => {
+            let trace_string = format!(
+                    "Incorrect redeemer type for validator {}.
+                    Double check you have wrapped the redeemer type as specified in your plutus.json",
+                    spend_name
+                );
+
+            let error_term = Term::Error.delayed_trace(Term::var("__incorrect_second_arg_type"));
+
+            let then_term = mint
+                .apply(Term::var("__first_arg"))
+                .apply(Term::var("__second_arg"));
+
+            let else_term = spend.apply(Term::var("__first_arg")).apply(
+                Term::head_list()
+                    .apply(Term::var(CONSTR_FIELDS_EXPOSER).apply(Term::var("__second_arg"))),
+            );
+
+            Term::var("__second_arg")
+                .delayed_choose_data(
+                    Term::equals_integer()
+                        .apply(Term::integer(0.into()))
+                        .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var("__second_arg")))
+                        .delayed_if_then_else(
+                            then_term.delayed_trace(Term::string(format!(
+                                "Running 2 arg validator {}",
+                                mint_name
+                            ))),
+                            else_term.delayed_trace(Term::string(format!(
+                                "Running 3 arg validator {}",
+                                spend_name
+                            ))),
+                        ),
+                    error_term.clone(),
+                    error_term.clone(),
+                    error_term.clone(),
+                    error_term,
+                )
+                .lambda("__incorrect_second_arg_type")
+                .apply(Term::string(trace_string))
+                .lambda("__second_arg")
+                .lambda("__first_arg")
+        }
     }
 }
 
@@ -1813,7 +1757,7 @@ pub fn cast_validator_args(term: Term<Name>, arguments: &[TypedArg]) -> Term<Nam
         if !matches!(arg.tipo.get_uplc_type(), UplcType::Data) {
             term = term
                 .lambda(arg.arg_name.get_variable_name().unwrap_or("_"))
-                .apply(convert_data_to_type(
+                .apply(known_data_to_type(
                     Term::var(arg.arg_name.get_variable_name().unwrap_or("_")),
                     &arg.tipo,
                 ));
@@ -1824,16 +1768,15 @@ pub fn cast_validator_args(term: Term<Name>, arguments: &[TypedArg]) -> Term<Nam
     term
 }
 
-pub fn wrap_validator_condition(air_tree: AirTree, trace: bool) -> AirTree {
+pub fn wrap_validator_condition(air_tree: AirTree, trace: TraceLevel) -> AirTree {
     let success_branch = vec![(air_tree, AirTree::void())];
-    let otherwise = if trace {
-        AirTree::trace(
+    let otherwise = match trace {
+        TraceLevel::Silent | TraceLevel::Compact => AirTree::error(void(), true),
+        TraceLevel::Verbose => AirTree::trace(
             AirTree::string("Validator returned false"),
             void(),
             AirTree::error(void(), true),
-        )
-    } else {
-        AirTree::error(void(), true)
+        ),
     };
 
     AirTree::if_branches(success_branch, void(), otherwise)
@@ -1860,4 +1803,50 @@ pub fn extract_constant(term: &Term<Name>) -> Option<Rc<UplcConstant>> {
         }
     }
     constant
+}
+
+pub fn get_src_code_by_span(
+    module_name: &str,
+    span: &Span,
+    module_src: &IndexMap<&str, &(String, LineNumbers)>,
+) -> String {
+    let (src, _) = module_src
+        .get(module_name)
+        .unwrap_or_else(|| panic!("Missing module {module_name}"));
+
+    src.get(span.start..span.end)
+        .expect("Out of bounds span")
+        .to_string()
+}
+
+pub fn get_line_columns_by_span(
+    module_name: &str,
+    span: &Span,
+    module_src: &IndexMap<&str, &(String, LineNumbers)>,
+) -> LineColumn {
+    let (_, lines) = module_src
+        .get(module_name)
+        .unwrap_or_else(|| panic!("Missing module {module_name}"));
+
+    lines
+        .line_and_column_number(span.start)
+        .expect("Out of bounds span")
+}
+
+pub fn air_holds_msg(air: &Air) -> bool {
+    match air {
+        Air::AssertConstr { .. } | Air::AssertBool { .. } | Air::FieldsEmpty | Air::ListEmpty => {
+            true
+        }
+
+        Air::FieldsExpose { is_expect, .. }
+        | Air::TupleAccessor { is_expect, .. }
+        | Air::CastFromData { is_expect, .. } => *is_expect,
+
+        Air::ListAccessor { expect_level, .. } => {
+            matches!(expect_level, ExpectLevel::Full | ExpectLevel::Items)
+        }
+
+        _ => false,
+    }
 }
