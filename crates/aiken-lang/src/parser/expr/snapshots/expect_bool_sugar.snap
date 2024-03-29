@@ -20,16 +20,23 @@ Assignment {
             name: "wow",
         },
     },
-    pattern: Constructor {
-        is_record: false,
-        location: 0..29,
-        name: "True",
-        arguments: [],
-        module: None,
-        constructor: (),
-        with_spread: false,
-        tipo: (),
+    patterns: [
+        AssignmentPattern {
+            pattern: Constructor {
+                is_record: false,
+                location: 0..29,
+                name: "True",
+                arguments: [],
+                module: None,
+                constructor: (),
+                with_spread: false,
+                tipo: (),
+            },
+            annotation: None,
+            location: 0..0,
+        },
+    ],
+    kind: Expect {
+        backpassing: false,
     },
-    kind: Expect,
-    annotation: None,
 }

@@ -1,18 +1,15 @@
-use std::{ops::Deref, rc::Rc};
-
-use vec1::Vec1;
-
-use crate::{
-    ast::{AssignmentKind, CallArg, Pattern, Span, PIPE_VARIABLE},
-    builtins::function,
-    expr::{TypedExpr, UntypedExpr},
-};
-
 use super::{
     error::{Error, UnifyErrorSituation},
     expr::ExprTyper,
     Type, ValueConstructor, ValueConstructorVariant,
 };
+use crate::{
+    ast::{AssignmentKind, CallArg, Pattern, Span, PIPE_VARIABLE},
+    builtins::function,
+    expr::{TypedExpr, UntypedExpr},
+};
+use std::{ops::Deref, rc::Rc};
+use vec1::Vec1;
 
 #[derive(Debug)]
 pub(crate) struct PipeTyper<'a, 'b, 'c> {
@@ -95,7 +92,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
 
                     match fun.tipo().fn_arity() {
                         // Rewrite as right(left, ..args)
-                        Some(arity) if arity == arguments.len() + 1 => {
+                        Some(arity) if arguments.len() < arity => {
                             self.infer_insert_pipe(fun, arguments, location)?
                         }
 
@@ -184,7 +181,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
         let assignment = TypedExpr::Assignment {
             location,
             tipo: expression.tipo(),
-            kind: AssignmentKind::Let,
+            kind: AssignmentKind::let_(),
             value: Box::new(expression),
             pattern: Pattern::Var {
                 location,

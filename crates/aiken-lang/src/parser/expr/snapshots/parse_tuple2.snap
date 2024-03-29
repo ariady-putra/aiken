@@ -27,12 +27,19 @@ Sequence {
                 },
                 location: 8..15,
             },
-            pattern: Var {
-                location: 4..5,
-                name: "a",
+            patterns: [
+                AssignmentPattern {
+                    pattern: Var {
+                        location: 4..5,
+                        name: "a",
+                    },
+                    annotation: None,
+                    location: 4..5,
+                },
+            ],
+            kind: Let {
+                backpassing: false,
             },
-            kind: Let,
-            annotation: None,
         },
         Tuple {
             location: 16..23,

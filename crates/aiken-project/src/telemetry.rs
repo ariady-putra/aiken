@@ -307,7 +307,15 @@ fn fmt_test(
         TestResult::PropertyTestResult(PropertyTestResult { iterations, .. }) => {
             test = format!(
                 "{test} [after {} test{}]",
-                pretty::pad_left(iterations.to_string(), max_iter, " "),
+                pretty::pad_left(
+                    if *iterations == 0 {
+                        "?".to_string()
+                    } else {
+                        iterations.to_string()
+                    },
+                    max_iter,
+                    " "
+                ),
                 if *iterations > 1 { "s" } else { "" }
             );
         }
@@ -329,53 +337,73 @@ fn fmt_test(
             ..
         }) if !result.is_success() => {
             test = format!(
-                "{test}\n{}{new_line}",
+                "{test}\n{}",
                 assertion.to_string(Stderr, unit_test.can_error),
-                new_line = if result.logs().is_empty() { "\n" } else { "" },
             );
         }
         _ => (),
     }
 
-    // CounterExample
-    if let TestResult::PropertyTestResult(PropertyTestResult {
-        counterexample: Some(counterexample),
-        ..
-    }) = result
-    {
-        let is_expected_failure = result.is_success();
+    // CounterExamples
+    if let TestResult::PropertyTestResult(PropertyTestResult { counterexample, .. }) = result {
+        match counterexample {
+            Err(err) => {
+                test = format!(
+                    "{test}\n{}\n{}",
+                    "× fuzzer failed unexpectedly"
+                        .if_supports_color(Stderr, |s| s.red())
+                        .if_supports_color(Stderr, |s| s.bold()),
+                    format!("| {err}").if_supports_color(Stderr, |s| s.red())
+                );
+            }
 
-        test = format!(
-            "{test}\n{}\n{}",
-            if is_expected_failure {
-                "★ counterexample"
-                    .if_supports_color(Stderr, |s| s.green())
-                    .if_supports_color(Stderr, |s| s.bold())
-                    .to_string()
-            } else {
-                "× counterexample"
-                    .if_supports_color(Stderr, |s| s.red())
-                    .if_supports_color(Stderr, |s| s.bold())
-                    .to_string()
-            },
-            &Formatter::new()
-                .expr(counterexample, false)
-                .to_pretty_string(60)
-                .lines()
-                .map(|line| {
-                    format!(
-                        "{} {}",
-                        "│".if_supports_color(Stderr, |s| if is_expected_failure {
-                            s.green().to_string()
-                        } else {
-                            s.red().to_string()
-                        }),
-                        line
-                    )
-                })
-                .collect::<Vec<String>>()
-                .join("\n"),
-        );
+            Ok(None) => {
+                if !result.is_success() {
+                    test = format!(
+                        "{test}\n{}",
+                        "× no counterexample found"
+                            .if_supports_color(Stderr, |s| s.red())
+                            .if_supports_color(Stderr, |s| s.bold())
+                    );
+                }
+            }
+
+            Ok(Some(counterexample)) => {
+                let is_expected_failure = result.is_success();
+
+                test = format!(
+                    "{test}\n{}\n{}",
+                    if is_expected_failure {
+                        "★ counterexample"
+                            .if_supports_color(Stderr, |s| s.green())
+                            .if_supports_color(Stderr, |s| s.bold())
+                            .to_string()
+                    } else {
+                        "× counterexample"
+                            .if_supports_color(Stderr, |s| s.red())
+                            .if_supports_color(Stderr, |s| s.bold())
+                            .to_string()
+                    },
+                    &Formatter::new()
+                        .expr(counterexample, false)
+                        .to_pretty_string(60)
+                        .lines()
+                        .map(|line| {
+                            format!(
+                                "{} {}",
+                                "│".if_supports_color(Stderr, |s| if is_expected_failure {
+                                    s.green().to_string()
+                                } else {
+                                    s.red().to_string()
+                                }),
+                                line
+                            )
+                        })
+                        .collect::<Vec<String>>()
+                        .join("\n"),
+                );
+            }
+        }
     }
 
     // Labels
@@ -409,12 +437,12 @@ fn fmt_test(
     }
 
     // Traces
-    if !result.logs().is_empty() && result.is_success() {
+    if !result.traces().is_empty() {
         test = format!(
-            "{test}\n{title}\n{logs}",
+            "{test}\n{title}\n{traces}",
             title = "· with traces".if_supports_color(Stderr, |s| s.bold()),
-            logs = result
-                .logs()
+            traces = result
+                .traces()
                 .iter()
                 .map(|line| { format!("| {line}",) })
                 .collect::<Vec<_>>()

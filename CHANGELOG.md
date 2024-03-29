@@ -1,6 +1,12 @@
 # Changelog
 
-## v1.0.25-alpha - UNRELEASED
+## v1.0.26-alpha - 2024-03-25
+
+### Fixed
+
+- **aiken-lang**: allow casting of types to Data in function pipiing. @KtorZ
+
+## v1.0.25-alpha - 2024-03-22
 
 ### Added
 
@@ -19,6 +25,8 @@
 - **aiken-lang**: Strings can contain a nul byte using the escape sequence `\0`. @KtorZ
 - **aiken**: The `check` command now accept an extra (optional) option `--max-success` to control the number of property-test iterations to perform. @KtorZ
 - **aiken**: The `docs` command now accept an optional flag `--include-dependencies` to include all dependencies in the generated documentation. @KtorZ
+- **aiken-lang**: Implement [function backpassing](https://www.roc-lang.org/tutorial#backpassing) as a syntactic sugar. @KtorZ
+- **aiken-lang**: Extend backpassing to support multiple patterns/arguments. @rvcas
 
 ### Fixed
 
@@ -40,10 +48,12 @@
 - **aiken-lang**: function aliases now resolved to the module and function name in codegen. @Microproofs
 - **aiken-lang**: fix indentation of pipelines to remain a multiple of the base indent increment. @KtorZ
 - **aiken-lang**: forbid presence of non-serialisable data-types in compound structures like List and Tuple. @KtorZ
+- **aiken-lang**: fix 'given' arity reported by 'incorrect arity' error message. @rvcas
 
 ### Changed
 
 - **aiken-lang**: Discards will now also type check the validator arguments instead of completely ignoring them. @Microproofs
+- **aiken-lang**: Further improvements to tracing when using expect casting from Data. @Microproofs
 - **aiken-lang**: The set of curriable builtins with arguments that occur 3 or more times are now hoisted in scope with the arguments curried. @Microproofs
 - **aiken-lang**: Improved the way the lambda inliner works to prevent unnecessary inlining into functions. @Microproofs
 - **aiken-lang**: Simplifications to the AirTree type in codegen. @Microproofs
@@ -53,6 +63,7 @@
 - **aiken-project**: remove test definitions from dependency modules. @rvcas
 - **aiken-project**: ignore warnings from dependency modules. @rvcas
 - **aiken-project**: parse sources in parallel, this resulted in a nice speedup. @rvcas
+- **aiken-lang**: You can no longer use expect on opaque types in various situations. @rvcas & @KtorZ
 
 ## v1.0.24-alpha - 2024-01-31
 

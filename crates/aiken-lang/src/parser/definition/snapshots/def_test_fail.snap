@@ -14,18 +14,25 @@ Test(
                         location: 45..50,
                         name: "False",
                     },
-                    pattern: Constructor {
-                        is_record: false,
-                        location: 38..42,
-                        name: "True",
-                        arguments: [],
-                        module: None,
-                        constructor: (),
-                        with_spread: false,
-                        tipo: (),
+                    patterns: [
+                        AssignmentPattern {
+                            pattern: Constructor {
+                                is_record: false,
+                                location: 38..42,
+                                name: "True",
+                                arguments: [],
+                                module: None,
+                                constructor: (),
+                                with_spread: false,
+                                tipo: (),
+                            },
+                            annotation: None,
+                            location: 38..42,
+                        },
+                    ],
+                    kind: Expect {
+                        backpassing: false,
                     },
-                    kind: Expect,
-                    annotation: None,
                 },
                 Var {
                     location: 54..59,

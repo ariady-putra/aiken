@@ -40,12 +40,19 @@ Sequence {
                     },
                 ],
             },
-            pattern: Var {
-                location: 4..9,
-                name: "tuple",
+            patterns: [
+                AssignmentPattern {
+                    pattern: Var {
+                        location: 4..9,
+                        name: "tuple",
+                    },
+                    annotation: None,
+                    location: 4..9,
+                },
+            ],
+            kind: Let {
+                backpassing: false,
             },
-            kind: Let,
-            annotation: None,
         },
         BinOp {
             location: 25..70,

@@ -8,12 +8,12 @@ use super::{
 };
 use crate::{
     ast::{
-        Annotation, Arg, ArgName, AssignmentKind, BinOp, Bls12_381Point, ByteArrayFormatPreference,
-        CallArg, ClauseGuard, Constant, Curve, IfBranch, LogicalOpChainKind, Pattern,
-        RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing, TypedArg, TypedCallArg,
-        TypedClause, TypedClauseGuard, TypedIfBranch, TypedPattern, TypedRecordUpdateArg, UnOp,
-        UntypedArg, UntypedClause, UntypedClauseGuard, UntypedIfBranch, UntypedPattern,
-        UntypedRecordUpdateArg,
+        self, Annotation, Arg, ArgName, AssignmentKind, AssignmentPattern, BinOp, Bls12_381Point,
+        ByteArrayFormatPreference, CallArg, ClauseGuard, Constant, Curve, IfBranch,
+        LogicalOpChainKind, Pattern, RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing,
+        TypedArg, TypedCallArg, TypedClause, TypedClauseGuard, TypedIfBranch, TypedPattern,
+        TypedRecordUpdateArg, UnOp, UntypedArg, UntypedAssignmentKind, UntypedClause,
+        UntypedClauseGuard, UntypedIfBranch, UntypedPattern, UntypedRecordUpdateArg,
     },
     builtins::{
         bool, byte_array, function, g1_element, g2_element, int, list, string, tuple, void,
@@ -211,10 +211,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         match expr {
             UntypedExpr::ErrorTerm { location } => Ok(self.infer_error_term(location)),
 
-            UntypedExpr::Var { location, name, .. } => self.infer_var(name, location),
+            UntypedExpr::Var { location, name } => self.infer_var(name, location),
 
             UntypedExpr::UInt {
-                location, value, ..
+                location,
+                value,
+                base: _,
             } => Ok(self.infer_uint(value, location)),
 
             UntypedExpr::Sequence {
@@ -222,13 +224,9 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 location,
             } => self.infer_seq(location, expressions),
 
-            UntypedExpr::Tuple {
-                location, elems, ..
-            } => self.infer_tuple(elems, location),
+            UntypedExpr::Tuple { location, elems } => self.infer_tuple(elems, location),
 
-            UntypedExpr::String {
-                location, value, ..
-            } => Ok(self.infer_string(value, location)),
+            UntypedExpr::String { location, value } => Ok(self.infer_string(value, location)),
 
             UntypedExpr::LogicalOpChain {
                 kind,
@@ -244,7 +242,6 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 arguments: args,
                 body,
                 return_annotation,
-                ..
             } => self.infer_fn(
                 args,
                 &[],
@@ -262,12 +259,20 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
             UntypedExpr::Assignment {
                 location,
-                pattern,
+                patterns,
                 value,
                 kind,
-                annotation,
-                ..
-            } => self.infer_assignment(pattern, *value, kind, &annotation, location),
+            } => {
+                // at this point due to backpassing rewrites,
+                // patterns is guaranteed to have one item
+                let AssignmentPattern {
+                    pattern,
+                    annotation,
+                    location: _,
+                } = patterns.into_vec().swap_remove(0);
+
+                self.infer_assignment(pattern, *value, kind, &annotation, location)
+            }
 
             UntypedExpr::Trace {
                 location,
@@ -287,14 +292,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 location,
                 elements,
                 tail,
-                ..
             } => self.infer_list(elements, tail, location),
 
             UntypedExpr::Call {
                 location,
                 fun,
                 arguments: args,
-                ..
             } => self.infer_call(*fun, args, location),
 
             UntypedExpr::BinOp {
@@ -302,21 +305,18 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 name,
                 left,
                 right,
-                ..
             } => self.infer_binop(name, *left, *right, location),
 
             UntypedExpr::FieldAccess {
                 location,
                 label,
                 container,
-                ..
             } => self.infer_field_access(*container, label, location),
 
             UntypedExpr::TupleIndex {
                 location,
                 index,
                 tuple,
-                ..
             } => self.infer_tuple_index(*tuple, index, location),
 
             UntypedExpr::ByteArray {
@@ -326,7 +326,9 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             } => self.infer_bytearray(bytes, preferred_format, location),
 
             UntypedExpr::CurvePoint {
-                location, point, ..
+                location,
+                point,
+                preferred_format: _,
             } => self.infer_curve_point(*point, location),
 
             UntypedExpr::RecordUpdate {
@@ -340,7 +342,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 location,
                 value,
                 op,
-            } => self.infer_un_op(location, value, op),
+            } => self.infer_un_op(location, *value, op),
 
             UntypedExpr::TraceIfFalse { value, location } => {
                 self.infer_trace_if_false(*value, location)
@@ -570,7 +572,10 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             ValueConstructorVariant::Record {
                 field_map: Some(field_map),
                 constructors_count,
-                ..
+                name: _,
+                arity: _,
+                location: _,
+                module: _,
             } => (field_map, *constructors_count),
             _ => {
                 return Err(Error::RecordUpdateInvalidConstructor {
@@ -663,10 +668,10 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
     fn infer_un_op(
         &mut self,
         location: Span,
-        value: Box<UntypedExpr>,
+        value: UntypedExpr,
         op: UnOp,
     ) -> Result<TypedExpr, Error> {
-        let value = self.infer(*value)?;
+        let value = self.infer(value)?;
 
         let tipo = match op {
             UnOp::Not => bool(),
@@ -696,7 +701,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             Ok(record_access) => Ok(record_access),
 
             Err(err) => match container {
-                UntypedExpr::Var { name, location, .. } => {
+                UntypedExpr::Var { name, location } => {
                     let module_access =
                         self.infer_module_access(&name, label, &location, access_location);
 
@@ -886,7 +891,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             annotation,
             location,
             doc,
-            ..
+            tipo: _,
         } = arg;
 
         let tipo = annotation
@@ -916,7 +921,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         &mut self,
         untyped_pattern: UntypedPattern,
         untyped_value: UntypedExpr,
-        kind: AssignmentKind,
+        kind: UntypedAssignmentKind,
         annotation: &Option<Annotation>,
         location: Span,
     ) -> Result<TypedExpr, Error> {
@@ -926,7 +931,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let value_is_data = value_typ.is_data();
 
         // Check that any type annotation is accurate.
-        let pattern = if let Some(ann) = annotation {
+        let ann_typ = if let Some(ann) = annotation {
             let ann_typ = self
                 .type_from_annotation(ann)
                 .map(|t| self.instantiate(t, &mut HashMap::new()))?;
@@ -935,55 +940,53 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 ann_typ.clone(),
                 value_typ.clone(),
                 typed_value.type_defining_location(),
-                (kind.is_let() && ann_typ.is_data()) || (kind.is_expect() && value_is_data),
+                (kind.is_let() && ann_typ.is_data()) || kind.is_expect(),
             )?;
 
             value_typ = ann_typ.clone();
 
-            // Ensure the pattern matches the type of the value
-            PatternTyper::new(self.environment, &self.hydrator).unify(
-                untyped_pattern.clone(),
-                value_typ.clone(),
-                Some(ann_typ),
-                kind.is_let(),
-            )?
+            Some(ann_typ)
         } else {
             if value_is_data && !untyped_pattern.is_var() && !untyped_pattern.is_discard() {
+                let ann = Annotation::Constructor {
+                    location: Span::empty(),
+                    module: None,
+                    name: "Type".to_string(),
+                    arguments: vec![],
+                };
+
                 return Err(Error::CastDataNoAnn {
                     location,
                     value: UntypedExpr::Assignment {
                         location,
                         value: untyped_value.into(),
-                        pattern: untyped_pattern,
+                        patterns: AssignmentPattern::new(untyped_pattern, Some(ann), Span::empty())
+                            .into(),
                         kind,
-                        annotation: Some(Annotation::Constructor {
-                            location: Span::empty(),
-                            module: None,
-                            name: "Type".to_string(),
-                            arguments: vec![],
-                        }),
                     },
                 });
             }
 
-            // Ensure the pattern matches the type of the value
-            PatternTyper::new(self.environment, &self.hydrator).unify(
-                untyped_pattern.clone(),
-                value_typ.clone(),
-                None,
-                kind.is_let(),
-            )?
+            None
         };
+
+        // Ensure the pattern matches the type of the value
+        let pattern = PatternTyper::new(self.environment, &self.hydrator).unify(
+            untyped_pattern.clone(),
+            value_typ.clone(),
+            ann_typ,
+            kind.is_let(),
+        )?;
 
         // If `expect` is explicitly used, we still check exhaustiveness but instead of returning an
         // error we emit a warning which explains that using `expect` is unnecessary.
         match kind {
-            AssignmentKind::Let => {
+            AssignmentKind::Let { .. } => {
                 self.environment
                     .check_exhaustiveness(&[&pattern], location, true)?
             }
 
-            AssignmentKind::Expect => {
+            AssignmentKind::Expect { .. } => {
                 let is_exaustive_pattern = self
                     .environment
                     .check_exhaustiveness(&[&pattern], location, false)
@@ -999,12 +1002,34 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                             },
                             pattern_location: untyped_pattern.location(),
                             value_location: untyped_value.location(),
-                            sample: UntypedExpr::Assignment {
-                                location: Span::empty(),
-                                value: Box::new(untyped_value),
-                                pattern: untyped_pattern,
-                                kind: AssignmentKind::Let,
-                                annotation: None,
+                            sample: match untyped_value {
+                                UntypedExpr::Var { name, .. } if name == ast::BACKPASS_VARIABLE => {
+                                    UntypedExpr::Assignment {
+                                        location: Span::empty(),
+                                        value: Box::new(UntypedExpr::Var {
+                                            name: "...".to_string(),
+                                            location: Span::empty(),
+                                        }),
+                                        patterns: AssignmentPattern::new(
+                                            untyped_pattern,
+                                            None,
+                                            Span::empty(),
+                                        )
+                                        .into(),
+                                        kind: AssignmentKind::Let { backpassing: true },
+                                    }
+                                }
+                                _ => UntypedExpr::Assignment {
+                                    location: Span::empty(),
+                                    value: Box::new(untyped_value),
+                                    patterns: AssignmentPattern::new(
+                                        untyped_pattern,
+                                        None,
+                                        Span::empty(),
+                                    )
+                                    .into(),
+                                    kind: AssignmentKind::let_(),
+                                },
                             },
                         });
                 }
@@ -1014,7 +1039,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(TypedExpr::Assignment {
             location,
             tipo: value_typ,
-            kind,
+            kind: kind.into(),
             pattern,
             value: Box::new(typed_value),
         })
@@ -1056,7 +1081,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             (
                 Type::Fn {
                     args: expected_arguments,
-                    ..
+                    ret: _,
+                    alias: _,
                 },
                 UntypedExpr::Fn {
                     arguments,
@@ -1064,7 +1090,6 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     return_annotation,
                     location,
                     fn_style,
-                    ..
                 },
             ) if fn_style != FnStyle::Capture && expected_arguments.len() == arguments.len() => {
                 self.infer_fn(
@@ -1367,9 +1392,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 base,
             }),
 
-            Constant::String {
-                location, value, ..
-            } => Ok(Constant::String { location, value }),
+            Constant::String { location, value } => Ok(Constant::String { location, value }),
 
             Constant::ByteArray {
                 location,
@@ -1707,13 +1730,232 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         PipeTyper::infer(self, expressions)
     }
 
+    fn backpass(
+        &mut self,
+        breakpoint: UntypedExpr,
+        mut continuation: Vec<UntypedExpr>,
+    ) -> UntypedExpr {
+        let UntypedExpr::Assignment {
+            location: _,
+            value,
+            kind,
+            patterns,
+        } = breakpoint
+        else {
+            unreachable!("backpass misuse: breakpoint isn't an Assignment ?!");
+        };
+
+        let value_location = value.location();
+
+        let call_location = Span {
+            start: value_location.end,
+            end: continuation
+                .last()
+                .map(|expr| expr.location().end)
+                .unwrap_or_else(|| value_location.end),
+        };
+
+        let mut names = Vec::new();
+
+        for (index, assignment_pattern) in patterns.into_iter().enumerate() {
+            let AssignmentPattern {
+                pattern,
+                annotation,
+                location: assignment_pattern_location,
+            } = assignment_pattern;
+
+            // In case where we have a Pattern that isn't simply a let-binding to a name, we do insert an extra let-binding
+            // in front of the continuation sequence. This is because we do not support patterns in function argument
+            // (which is perhaps something we should support?).
+            match pattern {
+                Pattern::Var {
+                    name,
+                    location: var_location,
+                } if kind.is_let() => {
+                    let name = ArgName::Named {
+                        label: name.clone(),
+                        name,
+                        location: var_location,
+                        is_validator_param: false,
+                    };
+
+                    names.push((name, assignment_pattern_location, annotation));
+                }
+                Pattern::Discard {
+                    name,
+                    location: var_location,
+                } if kind.is_let() => {
+                    let name = ArgName::Discarded {
+                        label: name.clone(),
+                        name,
+                        location: var_location,
+                    };
+
+                    names.push((name, assignment_pattern_location, annotation));
+                }
+                _ => {
+                    let name = format!("{}_{}", ast::BACKPASS_VARIABLE, index);
+
+                    let arg_name = ArgName::Named {
+                        label: name.clone(),
+                        name: name.clone(),
+                        location: pattern.location(),
+                        is_validator_param: false,
+                    };
+
+                    continuation.insert(
+                        0,
+                        UntypedExpr::Assignment {
+                            location: assignment_pattern_location,
+                            value: UntypedExpr::Var {
+                                location: assignment_pattern_location,
+                                name: name.clone(),
+                            }
+                            .into(),
+                            patterns: AssignmentPattern::new(
+                                pattern,
+                                annotation.clone(),
+                                assignment_pattern_location,
+                            )
+                            .into(),
+                            // erase backpassing while preserving assignment kind.
+                            kind: match kind {
+                                AssignmentKind::Let { .. } => AssignmentKind::let_(),
+                                AssignmentKind::Expect { .. } => AssignmentKind::expect(),
+                            },
+                        },
+                    );
+
+                    names.push((arg_name, assignment_pattern_location, annotation));
+                }
+            }
+        }
+
+        match *value {
+            UntypedExpr::Call {
+                fun,
+                arguments,
+                location: _,
+            } => {
+                let mut new_arguments = Vec::new();
+                new_arguments.extend(arguments);
+                new_arguments.push(CallArg {
+                    location: call_location,
+                    label: None,
+                    value: UntypedExpr::lambda(names, continuation, call_location),
+                });
+
+                UntypedExpr::Call {
+                    location: call_location,
+                    fun,
+                    arguments: new_arguments,
+                }
+            }
+
+            // This typically occurs on function captures. We do not try to assert anything on the
+            // length of the arguments here. We defer that to the rest of the type-checker. The
+            // only thing we have to do is rewrite the AST as-if someone had passed a callback.
+            //
+            // Now, whether this leads to an invalid call usage, that's not *our* immediate
+            // problem.
+            UntypedExpr::Fn {
+                fn_style,
+                ref arguments,
+                ref return_annotation,
+                location: _,
+                body: _,
+            } => {
+                let return_annotation = return_annotation.clone();
+
+                let arguments = arguments.iter().skip(1).cloned().collect::<Vec<_>>();
+
+                let call = UntypedExpr::Call {
+                    location: call_location,
+                    fun: value,
+                    arguments: vec![CallArg {
+                        location: call_location,
+                        label: None,
+                        value: UntypedExpr::lambda(names, continuation, call_location),
+                    }],
+                };
+
+                if arguments.is_empty() {
+                    call
+                } else {
+                    UntypedExpr::Fn {
+                        location: call_location,
+                        fn_style,
+                        arguments,
+                        body: call.into(),
+                        return_annotation,
+                    }
+                }
+            }
+
+            // Similarly to function captures, if we have any other expression we simply call it
+            // with our continuation. If the expression isn't callable? No problem, the
+            // type-checker will catch that eventually in exactly the same way as if the code was
+            // written like that to begin with.
+            _ => UntypedExpr::Call {
+                location: call_location,
+                fun: value,
+                arguments: vec![CallArg {
+                    location: call_location,
+                    label: None,
+                    value: UntypedExpr::lambda(names, continuation, call_location),
+                }],
+            },
+        }
+    }
+
     fn infer_seq(&mut self, location: Span, untyped: Vec<UntypedExpr>) -> Result<TypedExpr, Error> {
+        // Search for backpassing.
+        let mut breakpoint = None;
+        let mut prefix = Vec::with_capacity(untyped.len());
+        let mut suffix = Vec::with_capacity(untyped.len());
+        for expression in untyped.into_iter() {
+            if breakpoint.is_some() {
+                suffix.push(expression);
+            } else {
+                match expression {
+                    UntypedExpr::Assignment { kind, .. } if kind.is_backpassing() => {
+                        breakpoint = Some(expression);
+                    }
+                    UntypedExpr::Assignment {
+                        patterns,
+                        location,
+                        value: _,
+                        kind: _,
+                    } if patterns.len() > 1 => {
+                        return Err(Error::UnexpectedMultiPatternAssignment {
+                            arrow: patterns
+                                .last()
+                                .pattern
+                                .location()
+                                .map(|_, c_end| (c_end + 1, c_end + 1)),
+                            location: patterns[1..]
+                                .iter()
+                                .map(|ap| ap.pattern.location())
+                                .reduce(|acc, loc| acc.union(loc))
+                                .unwrap_or(location),
+                        });
+                    }
+                    _ => prefix.push(expression),
+                }
+            }
+        }
+
+        if let Some(breakpoint) = breakpoint {
+            prefix.push(self.backpass(breakpoint, suffix));
+            return self.infer_seq(location, prefix);
+        }
+
         let sequence = self.in_new_scope(|scope| {
-            let count = untyped.len();
+            let count = prefix.len();
 
             let mut expressions = Vec::with_capacity(count);
 
-            for (i, expression) in untyped.into_iter().enumerate() {
+            for (i, expression) in prefix.into_iter().enumerate() {
                 let no_assignment = assert_no_assignment(&expression);
 
                 let typed_expression = scope.infer(expression)?;
@@ -1804,7 +2046,10 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let tuple = self.infer(tuple)?;
 
         let tipo = match *tuple.tipo() {
-            Type::Tuple { ref elems, .. } => {
+            Type::Tuple {
+                ref elems,
+                alias: _,
+            } => {
                 let size = elems.len();
                 if index >= size {
                     Err(Error::TupleIndexOutOfBound {
@@ -1991,9 +2236,13 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 sample: UntypedExpr::Assignment {
                     location: Span::empty(),
                     value: Box::new(subject.clone()),
-                    pattern: clauses[0].patterns[0].clone(),
-                    kind: AssignmentKind::Let,
-                    annotation: None,
+                    patterns: AssignmentPattern::new(
+                        clauses[0].patterns[0].clone(),
+                        None,
+                        Span::empty(),
+                    )
+                    .into(),
+                    kind: AssignmentKind::let_(),
                 },
             });
         }
@@ -2120,7 +2369,7 @@ fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
                     with_spread: false,
                     tipo: void(),
                 },
-                kind: AssignmentKind::Let,
+                kind: AssignmentKind::let_(),
             });
         }
 
@@ -2134,7 +2383,14 @@ fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
 
 pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Result<(), Error> {
     match t.deref() {
-        Type::App { args, .. } => {
+        Type::App {
+            args,
+            name: _,
+            module: _,
+            public: _,
+            contains_opaque: _,
+            alias: _,
+        } => {
             if t.is_ml_result() {
                 return Err(Error::IllegalTypeInData {
                     tipo: t.clone(),
@@ -2149,7 +2405,7 @@ pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Resul
             Ok(())
         }
 
-        Type::Tuple { elems, .. } => {
+        Type::Tuple { elems, alias: _ } => {
             elems
                 .iter()
                 .map(|e| ensure_serialisable(false, e.clone(), location))
@@ -2158,7 +2414,11 @@ pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Resul
             Ok(())
         }
 
-        Type::Fn { args, ret, .. } => {
+        Type::Fn {
+            args,
+            ret,
+            alias: _,
+        } => {
             if !allow_fn {
                 return Err(Error::IllegalTypeInData {
                     tipo: t.clone(),
@@ -2173,10 +2433,14 @@ pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Resul
             ensure_serialisable(allow_fn, ret.clone(), location)
         }
 
-        Type::Var { tipo, .. } => match tipo.borrow().deref() {
+        Type::Var { tipo, alias } => match tipo.borrow().deref() {
             TypeVar::Unbound { .. } => Ok(()),
             TypeVar::Generic { .. } => Ok(()),
-            TypeVar::Link { tipo } => ensure_serialisable(allow_fn, tipo.clone(), location),
+            TypeVar::Link { tipo } => ensure_serialisable(
+                allow_fn,
+                Type::with_alias(tipo.clone(), alias.clone()),
+                location,
+            ),
         },
     }
 }

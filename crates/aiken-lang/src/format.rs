@@ -1,12 +1,12 @@
 use crate::{
     ast::{
-        Annotation, Arg, ArgName, ArgVia, AssignmentKind, BinOp, ByteArrayFormatPreference,
-        CallArg, ClauseGuard, Constant, CurveType, DataType, Definition, Function, IfBranch,
-        LogicalOpChainKind, ModuleConstant, Pattern, RecordConstructor, RecordConstructorArg,
-        RecordUpdateSpread, Span, TraceKind, TypeAlias, TypedArg, UnOp, UnqualifiedImport,
-        UntypedArg, UntypedArgVia, UntypedClause, UntypedClauseGuard, UntypedDefinition,
-        UntypedFunction, UntypedModule, UntypedPattern, UntypedRecordUpdateArg, Use, Validator,
-        CAPTURE_VARIABLE,
+        Annotation, Arg, ArgName, ArgVia, AssignmentKind, AssignmentPattern, BinOp,
+        ByteArrayFormatPreference, CallArg, ClauseGuard, Constant, CurveType, DataType, Definition,
+        Function, IfBranch, LogicalOpChainKind, ModuleConstant, Pattern, RecordConstructor,
+        RecordConstructorArg, RecordUpdateSpread, Span, TraceKind, TypeAlias, TypedArg, UnOp,
+        UnqualifiedImport, UntypedArg, UntypedArgVia, UntypedAssignmentKind, UntypedClause,
+        UntypedClauseGuard, UntypedDefinition, UntypedFunction, UntypedModule, UntypedPattern,
+        UntypedRecordUpdateArg, Use, Validator, CAPTURE_VARIABLE,
     },
     docvec,
     expr::{FnStyle, UntypedExpr, DEFAULT_ERROR_STR, DEFAULT_TODO_STR},
@@ -476,12 +476,17 @@ impl<'comments> Formatter<'comments> {
 
         let doc_comments = self.doc_comments(arg.location.start);
 
-        let doc = arg
-            .arg_name
-            .to_doc()
-            .append(" via ")
-            .append(self.expr(&arg.via, false))
-            .group();
+        let doc = match &arg.annotation {
+            None => arg.arg_name.to_doc(),
+            Some(a) => arg
+                .arg_name
+                .to_doc()
+                .append(": ")
+                .append(self.annotation(a)),
+        }
+        .append(" via ")
+        .append(self.expr(&arg.via, false))
+        .group();
 
         let doc = doc_comments.append(doc.group()).group();
 
@@ -679,36 +684,75 @@ impl<'comments> Formatter<'comments> {
 
     fn assignment<'a>(
         &mut self,
-        pattern: &'a UntypedPattern,
+        patterns: &'a Vec1<AssignmentPattern>,
         value: &'a UntypedExpr,
-        kind: AssignmentKind,
-        annotation: &'a Option<Annotation>,
+        kind: UntypedAssignmentKind,
     ) -> Document<'a> {
         let keyword = match kind {
-            AssignmentKind::Let => "let",
-            AssignmentKind::Expect => "expect",
+            AssignmentKind::Let { .. } => "let",
+            AssignmentKind::Expect { .. } => "expect",
         };
 
-        match pattern {
-            UntypedPattern::Constructor {
-                name, module: None, ..
-            } if name == "True" && annotation.is_none() && kind.is_expect() => {
+        let symbol = if kind.is_backpassing() { "<-" } else { "=" };
+
+        match patterns.first() {
+            AssignmentPattern {
+                pattern:
+                    UntypedPattern::Constructor {
+                        name, module: None, ..
+                    },
+                annotation,
+                location: _,
+            } if name == "True"
+                && annotation.is_none()
+                && kind.is_expect()
+                && patterns.len() == 1 =>
+            {
                 keyword.to_doc().append(self.case_clause_value(value))
             }
             _ => {
-                self.pop_empty_lines(pattern.location().end);
+                let patterns = patterns.into_iter().map(
+                    |AssignmentPattern {
+                         pattern,
+                         annotation,
+                         location: _,
+                     }| {
+                        self.pop_empty_lines(pattern.location().end);
 
-                let pattern = self.pattern(pattern);
+                        let pattern = self.pattern(pattern);
 
-                let annotation = annotation
-                    .as_ref()
-                    .map(|a| ": ".to_doc().append(self.annotation(a)));
+                        let annotation = annotation
+                            .as_ref()
+                            .map(|a| ": ".to_doc().append(self.annotation(a)));
 
-                keyword
+                        pattern.append(annotation).group()
+                    },
+                );
+
+                let pattern_len = patterns.len();
+
+                let assignment = keyword
                     .to_doc()
-                    .append(" ")
-                    .append(pattern.append(annotation).group())
-                    .append(" =")
+                    .append(if pattern_len == 1 {
+                        " ".to_doc()
+                    } else {
+                        break_("", " ")
+                    })
+                    .append(join(patterns, break_(",", ", ")));
+
+                let assignment = if pattern_len == 1 {
+                    assignment
+                } else {
+                    assignment.nest(INDENT)
+                };
+
+                assignment
+                    .append(if pattern_len == 1 {
+                        " ".to_doc()
+                    } else {
+                        break_(",", " ")
+                    })
+                    .append(symbol)
                     .append(self.case_clause_value(value))
             }
         }
@@ -904,11 +948,10 @@ impl<'comments> Formatter<'comments> {
 
             UntypedExpr::Assignment {
                 value,
-                pattern,
-                annotation,
+                patterns,
                 kind,
                 ..
-            } => self.assignment(pattern, value, *kind, annotation),
+            } => self.assignment(patterns, value, *kind),
 
             UntypedExpr::Trace {
                 kind, text, then, ..
@@ -1176,11 +1219,27 @@ impl<'comments> Formatter<'comments> {
         let left = self.expr(left, false);
         let right = self.expr(right, false);
 
-        self.operator_side(left, precedence, left_precedence)
-            .append(" ")
-            .append(name)
-            .append(" ")
-            .append(self.operator_side(right, precedence, right_precedence.saturating_sub(1)))
+        self.operator_side(
+            left,
+            precedence,
+            if matches!(name, BinOp::Or | BinOp::And) {
+                left_precedence.saturating_sub(1)
+            } else {
+                left_precedence
+            },
+        )
+        .append(" ")
+        .append(name)
+        .append(" ")
+        .append(self.operator_side(
+            right,
+            precedence,
+            if matches!(name, BinOp::Or | BinOp::And) {
+                right_precedence
+            } else {
+                right_precedence.saturating_sub(1)
+            },
+        ))
     }
 
     pub fn operator_side<'a>(&mut self, doc: Document<'a>, op: u8, side: u8) -> Document<'a> {

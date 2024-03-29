@@ -28,10 +28,17 @@ Assignment {
         ],
         tail: None,
     },
-    pattern: Var {
-        location: 4..9,
-        name: "thing",
+    patterns: [
+        AssignmentPattern {
+            pattern: Var {
+                location: 4..9,
+                name: "thing",
+            },
+            annotation: None,
+            location: 4..9,
+        },
+    ],
+    kind: Let {
+        backpassing: false,
     },
-    kind: Let,
-    annotation: None,
 }

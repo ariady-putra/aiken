@@ -1,32 +1,48 @@
-use chumsky::prelude::*;
-
 use crate::{
-    ast,
+    ast::{self, Span},
     expr::UntypedExpr,
     parser::{annotation, error::ParseError, pattern, token::Token},
 };
+use chumsky::prelude::*;
 
 pub fn let_(
     r: Recursive<'_, Token, UntypedExpr, ParseError>,
 ) -> impl Parser<Token, UntypedExpr, Error = ParseError> + '_ {
     just(Token::Let)
-        .ignore_then(pattern())
-        .then(just(Token::Colon).ignore_then(annotation()).or_not())
-        .then_ignore(just(Token::Equal))
+        .ignore_then(assignment_patterns())
+        .then(choice((just(Token::Equal), just(Token::LArrow))))
         .then(r.clone())
-        .validate(move |((pattern, annotation), value), span, emit| {
+        .validate(move |((patterns, kind), value), span, emit| {
             if matches!(value, UntypedExpr::Assignment { .. }) {
                 emit(ParseError::invalid_assignment_right_hand_side(span))
             }
 
+            let patterns = patterns
+                .try_into()
+                .expect("We use at_least(1) so this should never be empty");
+
             UntypedExpr::Assignment {
                 location: span,
                 value: Box::new(value),
-                pattern,
-                kind: ast::AssignmentKind::Let,
-                annotation,
+                patterns,
+                kind: ast::AssignmentKind::Let {
+                    backpassing: kind == Token::LArrow,
+                },
             }
         })
+}
+
+fn assignment_patterns() -> impl Parser<Token, Vec<ast::AssignmentPattern>, Error = ParseError> {
+    pattern()
+        .then(just(Token::Colon).ignore_then(annotation()).or_not())
+        .map_with_span(|(pattern, annotation), span| ast::AssignmentPattern {
+            pattern,
+            annotation,
+            location: span,
+        })
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
 }
 
 pub fn expect(
@@ -34,39 +50,37 @@ pub fn expect(
 ) -> impl Parser<Token, UntypedExpr, Error = ParseError> + '_ {
     just(Token::Expect)
         .ignore_then(
-            pattern()
-                .then(just(Token::Colon).ignore_then(annotation()).or_not())
-                .then_ignore(just(Token::Equal))
+            assignment_patterns()
+                .then(choice((just(Token::Equal), just(Token::LArrow))))
                 .or_not(),
         )
         .then(r.clone())
         .validate(move |(opt_pattern, value), span, emit| {
-            let (pattern, annotation) = opt_pattern.unwrap_or_else(|| {
-                (
-                    ast::UntypedPattern::Constructor {
-                        is_record: false,
-                        location: span,
-                        name: "True".to_string(),
-                        arguments: vec![],
-                        module: None,
-                        constructor: (),
-                        with_spread: false,
-                        tipo: (),
-                    },
-                    None,
-                )
-            });
-
             if matches!(value, UntypedExpr::Assignment { .. }) {
                 emit(ParseError::invalid_assignment_right_hand_side(span))
             }
 
+            let (patterns, kind) = opt_pattern.unwrap_or_else(|| {
+                let filler_true = ast::AssignmentPattern::new(
+                    ast::UntypedPattern::true_(span),
+                    None,
+                    Span::empty(),
+                );
+
+                (vec![filler_true], Token::Equal)
+            });
+
+            let patterns = patterns
+                .try_into()
+                .expect("We use at_least(1) so this should never be empty");
+
             UntypedExpr::Assignment {
                 location: span,
+                patterns,
                 value: Box::new(value),
-                pattern,
-                kind: ast::AssignmentKind::Expect,
-                annotation,
+                kind: ast::AssignmentKind::Expect {
+                    backpassing: kind == Token::LArrow,
+                },
             }
         })
 }

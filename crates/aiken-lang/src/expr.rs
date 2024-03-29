@@ -1,10 +1,10 @@
 use crate::{
     ast::{
-        self, Annotation, Arg, AssignmentKind, BinOp, Bls12_381Point, ByteArrayFormatPreference,
-        CallArg, Curve, DataType, DataTypeKey, DefinitionLocation, IfBranch, Located,
-        LogicalOpChainKind, ParsedCallArg, Pattern, RecordConstructorArg, RecordUpdateSpread, Span,
-        TraceKind, TypedClause, TypedDataType, TypedRecordUpdateArg, UnOp, UntypedClause,
-        UntypedRecordUpdateArg,
+        self, Annotation, Arg, ArgName, AssignmentPattern, BinOp, Bls12_381Point,
+        ByteArrayFormatPreference, CallArg, Curve, DataType, DataTypeKey, DefinitionLocation,
+        IfBranch, Located, LogicalOpChainKind, ParsedCallArg, Pattern, RecordConstructorArg,
+        RecordUpdateSpread, Span, TraceKind, TypedAssignmentKind, TypedClause, TypedDataType,
+        TypedRecordUpdateArg, UnOp, UntypedAssignmentKind, UntypedClause, UntypedRecordUpdateArg,
     },
     builtins::void,
     parser::token::Base,
@@ -106,7 +106,7 @@ pub enum TypedExpr {
         tipo: Rc<Type>,
         value: Box<Self>,
         pattern: Pattern<PatternConstructor, Rc<Type>>,
-        kind: AssignmentKind,
+        kind: TypedAssignmentKind,
     },
 
     Trace {
@@ -518,9 +518,8 @@ pub enum UntypedExpr {
     Assignment {
         location: Span,
         value: Box<Self>,
-        pattern: Pattern<(), ()>,
-        kind: AssignmentKind,
-        annotation: Option<Annotation>,
+        patterns: Vec1<AssignmentPattern>,
+        kind: UntypedAssignmentKind,
     },
 
     Trace {
@@ -1298,5 +1297,32 @@ impl UntypedExpr {
             self,
             Self::String { .. } | Self::UInt { .. } | Self::ByteArray { .. }
         )
+    }
+
+    pub fn lambda(
+        names: Vec<(ArgName, Span, Option<Annotation>)>,
+        expressions: Vec<UntypedExpr>,
+        location: Span,
+    ) -> Self {
+        Self::Fn {
+            location,
+            fn_style: FnStyle::Plain,
+            arguments: names
+                .into_iter()
+                .map(|(arg_name, location, annotation)| Arg {
+                    location,
+                    doc: None,
+                    annotation,
+                    tipo: (),
+                    arg_name,
+                })
+                .collect(),
+            body: Self::Sequence {
+                location,
+                expressions,
+            }
+            .into(),
+            return_annotation: None,
+        }
     }
 }

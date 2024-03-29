@@ -12,25 +12,32 @@ Assignment {
             name: "something",
         },
     },
-    pattern: Constructor {
-        is_record: false,
-        location: 7..14,
-        name: "Some",
-        arguments: [
-            CallArg {
-                label: None,
-                location: 12..13,
-                value: Var {
-                    location: 12..13,
-                    name: "x",
-                },
+    patterns: [
+        AssignmentPattern {
+            pattern: Constructor {
+                is_record: false,
+                location: 7..14,
+                name: "Some",
+                arguments: [
+                    CallArg {
+                        label: None,
+                        location: 12..13,
+                        value: Var {
+                            location: 12..13,
+                            name: "x",
+                        },
+                    },
+                ],
+                module: None,
+                constructor: (),
+                with_spread: false,
+                tipo: (),
             },
-        ],
-        module: None,
-        constructor: (),
-        with_spread: false,
-        tipo: (),
+            annotation: None,
+            location: 7..14,
+        },
+    ],
+    kind: Expect {
+        backpassing: false,
     },
-    kind: Expect,
-    annotation: None,
 }

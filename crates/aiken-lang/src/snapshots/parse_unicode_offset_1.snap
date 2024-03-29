@@ -24,12 +24,19 @@ Module {
                                 ],
                                 preferred_format: Utf8String,
                             },
-                            pattern: Var {
-                                location: 17..18,
-                                name: "x",
+                            patterns: [
+                                AssignmentPattern {
+                                    pattern: Var {
+                                        location: 17..18,
+                                        name: "x",
+                                    },
+                                    annotation: None,
+                                    location: 17..18,
+                                },
+                            ],
+                            kind: Let {
+                                backpassing: false,
                             },
-                            kind: Let,
-                            annotation: None,
                         },
                         Var {
                             location: 29..30,

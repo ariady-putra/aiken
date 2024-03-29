@@ -14,12 +14,19 @@ Sequence {
                     numeric_underscore: true,
                 },
             },
-            pattern: Var {
-                location: 8..9,
-                name: "i",
+            patterns: [
+                AssignmentPattern {
+                    pattern: Var {
+                        location: 8..9,
+                        name: "i",
+                    },
+                    annotation: None,
+                    location: 8..9,
+                },
+            ],
+            kind: Let {
+                backpassing: false,
             },
-            kind: Let,
-            annotation: None,
         },
         Assignment {
             location: 24..41,
@@ -30,12 +37,19 @@ Sequence {
                     numeric_underscore: true,
                 },
             },
-            pattern: Var {
-                location: 28..29,
-                name: "j",
+            patterns: [
+                AssignmentPattern {
+                    pattern: Var {
+                        location: 28..29,
+                        name: "j",
+                    },
+                    annotation: None,
+                    location: 28..29,
+                },
+            ],
+            kind: Let {
+                backpassing: false,
             },
-            kind: Let,
-            annotation: None,
         },
         Assignment {
             location: 44..59,
@@ -50,12 +64,19 @@ Sequence {
                     },
                 },
             },
-            pattern: Var {
-                location: 48..49,
-                name: "k",
+            patterns: [
+                AssignmentPattern {
+                    pattern: Var {
+                        location: 48..49,
+                        name: "k",
+                    },
+                    annotation: None,
+                    location: 48..49,
+                },
+            ],
+            kind: Let {
+                backpassing: false,
             },
-            kind: Let,
-            annotation: None,
         },
     ],
 }

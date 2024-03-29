@@ -16,6 +16,7 @@ fn parse(source_code: &str) -> UntypedModule {
 
 fn check_module(
     ast: UntypedModule,
+    extra: Vec<(String, UntypedModule)>,
     kind: ModuleKind,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
     let id_gen = IdGenerator::new();
@@ -25,6 +26,21 @@ fn check_module(
     let mut module_types = HashMap::new();
     module_types.insert("aiken".to_string(), builtins::prelude(&id_gen));
     module_types.insert("aiken/builtin".to_string(), builtins::plutus(&id_gen));
+
+    for (package, module) in extra {
+        let mut warnings = vec![];
+        let typed_module = module
+            .infer(
+                &id_gen,
+                kind,
+                &package,
+                &module_types,
+                Tracing::All(TraceLevel::Verbose),
+                &mut warnings,
+            )
+            .expect("extra dependency did not compile");
+        module_types.insert(package.clone(), typed_module.type_info.clone());
+    }
 
     let result = ast.infer(
         &id_gen,
@@ -41,13 +57,20 @@ fn check_module(
 }
 
 fn check(ast: UntypedModule) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
-    check_module(ast, ModuleKind::Lib)
+    check_module(ast, Vec::new(), ModuleKind::Lib)
+}
+
+fn check_with_deps(
+    ast: UntypedModule,
+    extra: Vec<(String, UntypedModule)>,
+) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
+    check_module(ast, extra, ModuleKind::Lib)
 }
 
 fn check_validator(
     ast: UntypedModule,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
-    check_module(ast, ModuleKind::Validator)
+    check_module(ast, Vec::new(), ModuleKind::Validator)
 }
 
 #[test]
@@ -1186,6 +1209,272 @@ fn trace_if_false_ok() {
 }
 
 #[test]
+fn backpassing_basic() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          let i <- and_then(opt_i)
+          let j <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn backpassing_expect_simple() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          expect 42 <- and_then(opt_i)
+          let j <- and_then(opt_j)
+          Some(j + 42)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn backpassing_expect_nested() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(Option<a>) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(Some(a))
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          expect Some(i) <- and_then(opt_i)
+          expect Some(j) <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn backpassing_interleaved_capture() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          let f = and_then(opt_i, _)
+          let i <- f
+          let g = and_then(opt_j, _)
+          let j <- g
+          Some(i + j)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn backpassing_patterns() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        type Foo {
+          foo: Int,
+        }
+
+        fn backpassing(opt_i: Option<Foo>, opt_j: Option<Foo>) -> Option<Int> {
+          let Foo { foo: i } <- and_then(opt_i)
+          let Foo { foo: j } <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn backpassing_not_a_function() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          let i <- opt_i
+          let j <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::NotFn { .. }))
+    ))
+}
+
+#[test]
+fn backpassing_non_exhaustive_pattern() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          let 42 <- and_then(opt_i)
+          let j <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::NotExhaustivePatternMatch { .. }))
+    ))
+}
+
+#[test]
+fn backpassing_unsaturated_fn() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          let i <- and_then
+          let j <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::IncorrectFieldsArity { .. }))
+    ))
+}
+
+#[test]
+fn backpassing_expect_type_mismatch() {
+    let source_code = r#"
+        fn and_then(opt: Option<a>, then: fn(a) -> Option<b>) -> Option<b> {
+          when opt is {
+            None -> None
+            Some(a) -> then(a)
+          }
+        }
+
+        fn backpassing(opt_i: Option<Int>, opt_j: Option<Int>) -> Option<Int> {
+          expect Some(i) <- and_then(opt_i)
+          let j <- and_then(opt_j)
+          Some(i + j)
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn backpassing_multi_args() {
+    let source_code = r#"
+        fn fold(list: List<a>, init: b, then: fn(a, b) -> b) -> b {
+          when list is {
+            [] -> init
+            [x, ..rest] -> fold(rest, then(x, init), then)
+          }
+        }
+
+        fn backpassing() -> Int {
+          let elem, acc <- fold([1, 2, 3], 0)
+
+          elem + acc
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn backpassing_multi_args_expect() {
+    let source_code = r#"
+        pub type Bar {
+          Foo(Int)
+          Wow(Int)
+        }
+
+        fn fold(list: List<a>, init: b, then: fn(a, b) -> b) -> b {
+          when list is {
+            [] -> init
+            [x, ..rest] -> fold(rest, then(x, init), then)
+          }
+        }
+
+        pub fn backpassing() -> Bar {
+          expect Foo(elem), Wow(acc) <- fold([Foo(1), Foo(2), Foo(3)], Wow(0))
+
+          Wow(elem + acc)
+        }
+    "#;
+
+    assert!(matches!(check(parse(source_code)), Ok((warnings, _)) if warnings.is_empty()))
+}
+
+#[test]
+fn backpassing_multi_args_using_equals() {
+    let source_code = r#"
+        fn fold(list: List<a>, init: b, then: fn(a, b) -> b) -> b {
+          when list is {
+            [] -> init
+            [x, ..rest] -> fold(rest, then(x, init), then)
+          }
+        }
+
+        fn backpassing() -> Int {
+          let elem, acc = fold([1, 2, 3], 0, fn(elem, acc) { elem + acc })
+
+          elem + acc
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::UnexpectedMultiPatternAssignment { .. }))
+    ))
+}
+
+#[test]
 fn trace_if_false_ko() {
     let source_code = r#"
         fn add(a: Int, b: Int) {
@@ -1304,6 +1593,57 @@ fn pipe_with_wrong_type_and_full_args() {
             }
         ))
     ))
+}
+
+#[test]
+fn pipe_wrong_arity_partially_applied() {
+    let source_code = r#"
+        fn f(_a: Int, _b: Int, _c: Int) -> Int {
+            todo
+        }
+
+        test foo() {
+            0 |> f(0)
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::IncorrectFieldsArity { given, expected, .. })) if given == 2 && expected == 3
+    ))
+}
+
+#[test]
+fn pipe_wrong_arity_fully_saturated() {
+    let source_code = r#"
+        fn f(_a: Int, _b: Int, _c: Int) -> Int {
+            todo
+        }
+
+        test foo() {
+            0 |> f(0, 0, 0)
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::NotFn { .. }))
+    ))
+}
+
+#[test]
+fn pipe_wrong_arity_fully_saturated_return_fn() {
+    let source_code = r#"
+        fn f(_a: Int, _b: Int, _c: Int) -> fn(Int) -> Int {
+            todo
+        }
+
+        test foo() {
+            (0 |> f(0, 0, 0)) == 0
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
 }
 
 #[test]
@@ -1477,4 +1817,396 @@ fn discarded_let_bindings() {
         },
         _ => unreachable!("ast isn't a Fn"),
     }
+}
+
+#[test]
+fn backpassing_type_annotation() {
+    let source_code = r#"
+        pub type Foo {
+          foo: Int,
+        }
+
+        fn transition_fold4(
+          inputs,
+          callback,
+        ) {
+          when inputs is {
+            [] -> {
+              (Foo(1), inputs)
+            }
+            [input, ..remaining_inputs] -> {
+
+              callback(input)(
+                fn(foo) {
+                  transition_fold4(
+                    remaining_inputs,
+                    callback,
+                  )
+                },
+              )
+            }
+          }
+        }
+
+        pub fn backpassing(x) {
+          let input: Foo <-
+            transition_fold4(
+              x,
+            )
+
+          fn(g){
+            g(if input.foo == 1{
+              1
+            } else {
+              2
+            })
+          }
+
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn forbid_expect_into_opaque_type_from_data() {
+    let source_code = r#"
+        opaque type Thing { inner: Int }
+
+        fn bar(n: Data) {
+          expect a: Thing = n
+
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::ExpectOnOpaqueType { .. }))
+    ))
+}
+
+#[test]
+fn allow_expect_into_type_from_data() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          expect a: Option<Int> = n
+          a
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn forbid_partial_down_casting() {
+    let source_code = r#"
+        type Foo {
+          x: Int
+        }
+
+        fn bar(n: List<Foo>) {
+          expect a: List<Data> = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check(parse(source_code))),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn forbid_partial_up_casting() {
+    let source_code = r#"
+        type Foo {
+          x: Int
+        }
+
+        fn bar(n: List<Data>) {
+          expect a: List<Foo> = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check(parse(source_code))),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn allow_expect_into_type_from_data_2() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          expect Some(a): Option<Int> = n
+          a
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn forbid_expect_from_arbitrary_type() {
+    let source_code = r#"
+        type Foo {
+          x: Int
+        }
+
+        type Bar {
+          y: Int
+        }
+
+        fn bar(f: Foo) {
+          expect b: Bar = f
+          Void
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn forbid_expect_into_opaque_type_constructor_without_typecasting_in_module() {
+    let source_code = r#"
+        opaque type Thing {
+          Foo(Int)
+          Bar(Int)
+        }
+
+        fn bar(thing: Thing) {
+          expect Foo(a) = thing
+          a
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn forbid_importing_or_using_opaque_constructors() {
+    let dependency = r#"
+        pub opaque type Thing {
+          Foo(Int)
+          Bar(Int)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo/thing.{Thing, Foo}
+
+        fn bar(thing: Thing) {
+          expect Foo(a) = thing
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check_with_deps(
+            parse(source_code),
+            vec![("foo/thing".to_string(), parse(dependency))],
+        ),
+        Err((_, Error::UnknownModuleField { .. })),
+    ));
+
+    let source_code = r#"
+        use foo/thing.{Thing}
+
+        fn bar(thing: Thing) {
+          expect Foo(a) = thing
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check_with_deps(
+            parse(source_code),
+            vec![("foo/thing".to_string(), parse(dependency))],
+        ),
+        Err((_, Error::UnknownTypeConstructor { .. })),
+    ));
+}
+
+#[test]
+fn forbid_expect_into_opaque_type_constructor_with_typecasting() {
+    let source_code = r#"
+        opaque type Thing {
+          Foo(Int)
+          Bar(Int)
+        }
+
+        fn bar(data: Data) {
+          expect Foo(a): Thing = data
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::ExpectOnOpaqueType { .. }))
+    ))
+}
+
+#[test]
+fn forbid_expect_into_nested_opaque_in_record_without_typecasting() {
+    let source_code = r#"
+        opaque type Thing { inner: Int }
+
+        type Foo { foo: Thing }
+
+        fn bar(f: Foo) {
+          expect Foo { foo: Thing { inner } } : Foo = f
+          Void
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn forbid_expect_into_nested_opaque_in_record_with_typecasting() {
+    let source_code = r#"
+        opaque type Thing { inner: Int }
+
+        type Foo { foo: Thing }
+
+        fn bar(a: Data) {
+          expect Foo { foo: Thing { inner } } : Foo = a
+          Void
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::ExpectOnOpaqueType { .. }))
+    ))
+}
+
+#[test]
+fn forbid_expect_into_nested_opaque_in_list() {
+    let source_code = r#"
+        opaque type Thing { inner: Int }
+
+        fn bar(a: Data) {
+          expect [x]: List<Thing> = [a]
+          Void
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::ExpectOnOpaqueType { .. }))
+    ))
+}
+
+#[test]
+fn allow_expect_on_var_patterns_that_are_opaque() {
+    let source_code = r#"
+        opaque type Thing { inner: Int }
+
+        fn bar(a: Option<Thing>) {
+          expect Some(thing) = a
+          thing.inner
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn can_down_cast_to_data_always() {
+    let source_code = r#"
+        pub opaque type Foo { x: Int }
+        pub fn bar(a: Foo) {
+          let b: Data = a
+          b
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn can_down_cast_to_data_on_fn_call() {
+    let source_code = r#"
+        pub type Foo { Foo }
+
+        pub fn serialise(data: Data) -> ByteArray {
+            ""
+        }
+
+        test foo() {
+            serialise(Foo) == ""
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn can_down_cast_to_data_on_pipe() {
+    let source_code = r#"
+        pub type Foo { Foo }
+
+        pub fn serialise(data: Data) -> ByteArray {
+            ""
+        }
+
+        test foo() {
+            (Foo |> serialise) == ""
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn correct_span_for_backpassing_args() {
+    let source_code = r#"
+        fn fold(list: List<a>, acc: b, f: fn(a, b) -> b) -> b {
+          when list is {
+            [] -> acc
+            [x, ..xs] -> fold(xs, f(x, acc), f)
+          }
+        }
+
+        pub fn sum(list: List<Int>) -> Int {
+          let a, b <- fold(list, 0)
+
+          a + 1
+        }
+    "#;
+
+    let (warnings, _ast) = check(parse(source_code)).unwrap();
+
+    assert!(
+        matches!(&warnings[0], Warning::UnusedVariable { ref name, location } if name == "b" && location.start == 245 && location.end == 246)
+    );
+}
+
+#[test]
+fn allow_discard_for_backpassing_args() {
+    let source_code = r#"
+        fn fold(list: List<a>, acc: b, f: fn(a, b) -> b) -> b {
+          when list is {
+            [] -> acc
+            [x, ..xs] -> fold(xs, f(x, acc), f)
+          }
+        }
+
+        pub fn sum(list: List<Int>) -> Int {
+          let a, _b <- fold(list, 0)
+
+          a + 1
+        }
+    "#;
+
+    let (warnings, _ast) = check(parse(source_code)).unwrap();
+
+    assert_eq!(warnings.len(), 0);
 }

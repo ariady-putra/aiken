@@ -16,6 +16,7 @@ use std::{
 use uplc::machine::runtime::Compressable;
 use vec1::Vec1;
 
+pub const BACKPASS_VARIABLE: &str = "_backpass";
 pub const CAPTURE_VARIABLE: &str = "_capture";
 pub const PIPE_VARIABLE: &str = "_pipe";
 
@@ -792,6 +793,19 @@ impl<A> Arg<A> {
         self.arg_name.get_variable_name()
     }
 
+    pub fn is_capture(&self) -> bool {
+        if let ArgName::Named {
+            ref name, location, ..
+        } = self.arg_name
+        {
+            return name.starts_with(CAPTURE_VARIABLE)
+                && location == Span::empty()
+                && self.location == Span::empty();
+        }
+
+        false
+    }
+
     pub fn put_doc(&mut self, new_doc: String) {
         self.doc = Some(new_doc);
     }
@@ -1162,6 +1176,21 @@ impl<A, B> Pattern<A, B> {
     }
 }
 
+impl UntypedPattern {
+    pub fn true_(location: Span) -> UntypedPattern {
+        UntypedPattern::Constructor {
+            location,
+            name: "True".to_string(),
+            arguments: vec![],
+            constructor: (),
+            with_spread: false,
+            tipo: (),
+            module: None,
+            is_record: false,
+        }
+    }
+}
+
 impl TypedPattern {
     pub fn find_node<'a>(&'a self, byte_index: usize, value: &Rc<Type>) -> Option<Located<'a>> {
         if !self.location().contains(byte_index) {
@@ -1422,25 +1451,86 @@ impl Default for Bls12_381Point {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy, serde::Serialize, serde::Deserialize)]
-pub enum AssignmentKind {
-    Let,
-    Expect,
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssignmentPattern {
+    pub pattern: UntypedPattern,
+    pub annotation: Option<Annotation>,
+    pub location: Span,
 }
 
-impl AssignmentKind {
+impl AssignmentPattern {
+    pub fn new(
+        pattern: UntypedPattern,
+        annotation: Option<Annotation>,
+        location: Span,
+    ) -> AssignmentPattern {
+        Self {
+            pattern,
+            annotation,
+            location,
+        }
+    }
+}
+
+impl From<AssignmentPattern> for Vec1<AssignmentPattern> {
+    fn from(value: AssignmentPattern) -> Self {
+        Vec1::new(value)
+    }
+}
+
+pub type UntypedAssignmentKind = AssignmentKind<bool>;
+pub type TypedAssignmentKind = AssignmentKind<()>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy, serde::Serialize, serde::Deserialize)]
+pub enum AssignmentKind<T> {
+    Let { backpassing: T },
+    Expect { backpassing: T },
+}
+
+impl From<UntypedAssignmentKind> for TypedAssignmentKind {
+    fn from(kind: UntypedAssignmentKind) -> TypedAssignmentKind {
+        match kind {
+            AssignmentKind::Let { .. } => AssignmentKind::Let { backpassing: () },
+            AssignmentKind::Expect { .. } => AssignmentKind::Expect { backpassing: () },
+        }
+    }
+}
+
+impl<T> AssignmentKind<T> {
     pub fn is_let(&self) -> bool {
-        matches!(self, AssignmentKind::Let)
+        matches!(self, AssignmentKind::Let { .. })
     }
 
     pub fn is_expect(&self) -> bool {
-        matches!(self, AssignmentKind::Expect)
+        matches!(self, AssignmentKind::Expect { .. })
     }
 
     pub fn location_offset(&self) -> usize {
         match self {
-            AssignmentKind::Let => 3,
-            AssignmentKind::Expect => 6,
+            AssignmentKind::Let { .. } => 3,
+            AssignmentKind::Expect { .. } => 6,
+        }
+    }
+}
+
+impl AssignmentKind<bool> {
+    pub fn is_backpassing(&self) -> bool {
+        match self {
+            Self::Let { backpassing } | Self::Expect { backpassing } => *backpassing,
+        }
+    }
+}
+
+impl<T: Default> AssignmentKind<T> {
+    pub fn let_() -> Self {
+        AssignmentKind::Let {
+            backpassing: Default::default(),
+        }
+    }
+
+    pub fn expect() -> Self {
+        AssignmentKind::Expect {
+            backpassing: Default::default(),
         }
     }
 }
@@ -1731,6 +1821,47 @@ impl Span {
         Self {
             start: self.start().min(other.start()),
             end: self.end().max(other.end()),
+        }
+    }
+
+    /// Map the current start and end of the Span to new values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aiken_lang::ast::Span;
+    ///
+    /// let span = Span { start: 0, end: 1 };
+    ///
+    /// let other = span.map(|start, end| (start + 2, end + 4));
+    ///
+    /// assert_eq!(other.start, 2);
+    /// assert_eq!(other.end, 5);
+    /// ```
+    pub fn map<F: FnOnce(usize, usize) -> (usize, usize)>(&self, f: F) -> Self {
+        let (start, end) = f(self.start, self.end);
+
+        Self { start, end }
+    }
+
+    /// Map the current end of the Span to a new value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aiken_lang::ast::Span;
+    ///
+    /// let span = Span { start: 0, end: 1 };
+    ///
+    /// let other = span.map_end(|end| end + 1);
+    ///
+    /// assert_eq!(other.start, 0);
+    /// assert_eq!(other.end, 2);
+    /// ```
+    pub fn map_end<F: FnOnce(usize) -> usize>(&self, f: F) -> Self {
+        Self {
+            start: self.start,
+            end: f(self.end),
         }
     }
 

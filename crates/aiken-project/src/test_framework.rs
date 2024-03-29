@@ -8,6 +8,7 @@ use aiken_lang::{
 };
 use cryptoxide::{blake2b::Blake2b, digest::Digest};
 use indexmap::IndexMap;
+use itertools::Itertools;
 use owo_colors::{OwoColorize, Stream};
 use pallas::ledger::primitives::alonzo::{Constr, PlutusData};
 use patricia_tree::PatriciaMap;
@@ -180,8 +181,7 @@ impl UnitTest {
             success,
             test: self.to_owned(),
             spent_budget: eval_result.cost(),
-            logs: eval_result.logs(),
-            output: eval_result.result().ok(),
+            traces: eval_result.logs(),
             assertion: self.assertion,
         })
     }
@@ -213,6 +213,13 @@ pub struct Fuzzer<T> {
     pub stripped_type_info: Rc<Type>,
 }
 
+#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
+#[error("Fuzzer exited unexpectedly: {uplc_error}")]
+pub struct FuzzerError {
+    traces: Vec<String>,
+    uplc_error: uplc::machine::Error,
+}
+
 impl PropertyTest {
     pub const DEFAULT_MAX_SUCCESS: usize = 100;
 
@@ -220,13 +227,28 @@ impl PropertyTest {
     /// may stops earlier on failure; in which case a 'counterexample' is returned.
     pub fn run<U>(self, seed: u32, n: usize) -> TestResult<U, PlutusData> {
         let mut labels = BTreeMap::new();
+        let mut remaining = n;
 
-        let (counterexample, iterations) =
-            match self.run_n_times(n, Prng::from_seed(seed), None, &mut labels) {
-                None => (None, n),
-                Some((remaining, counterexample)) => {
-                    (Some(counterexample.value), n - remaining + 1)
-                }
+        let (traces, counterexample, iterations) =
+            match self.run_n_times(&mut remaining, Prng::from_seed(seed), &mut labels) {
+                Ok(None) => (Vec::new(), Ok(None), n),
+                Ok(Some(counterexample)) => (
+                    self.eval(&counterexample.value)
+                        .logs()
+                        .into_iter()
+                        .filter(|s| PropertyTest::extract_label(s).is_none())
+                        .collect(),
+                    Ok(Some(counterexample.value)),
+                    n - remaining + 1,
+                ),
+                Err(FuzzerError { traces, uplc_error }) => (
+                    traces
+                        .into_iter()
+                        .filter(|s| PropertyTest::extract_label(s).is_none())
+                        .collect(),
+                    Err(uplc_error),
+                    0,
+                ),
             };
 
         TestResult::PropertyTestResult(PropertyTestResult {
@@ -234,49 +256,45 @@ impl PropertyTest {
             counterexample,
             iterations,
             labels,
+            traces,
         })
     }
 
     fn run_n_times<'a>(
         &'a self,
-        remaining: usize,
-        prng: Prng,
-        counterexample: Option<(usize, Counterexample<'a>)>,
+        remaining: &mut usize,
+        initial_prng: Prng,
         labels: &mut BTreeMap<String, usize>,
-    ) -> Option<(usize, Counterexample<'a>)> {
-        // We short-circuit failures in case we have any. The counterexample is already simplified
-        // at this point.
-        if remaining > 0 && counterexample.is_none() {
-            let (next_prng, counterexample) = self.run_once(prng, labels);
-            self.run_n_times(
-                remaining - 1,
-                next_prng,
-                counterexample.map(|c| (remaining, c)),
-                labels,
-            )
-        } else {
-            counterexample
+    ) -> Result<Option<Counterexample<'a>>, FuzzerError> {
+        let mut prng = initial_prng;
+        let mut counterexample = None;
+
+        while *remaining > 0 && counterexample.is_none() {
+            (prng, counterexample) = self.run_once(prng, labels)?;
+            *remaining -= 1;
         }
+
+        Ok(counterexample)
     }
 
     fn run_once(
         &self,
         prng: Prng,
         labels: &mut BTreeMap<String, usize>,
-    ) -> (Prng, Option<Counterexample<'_>>) {
+    ) -> Result<(Prng, Option<Counterexample<'_>>), FuzzerError> {
         let (next_prng, value) = prng
-            .sample(&self.fuzzer.program)
-            .expect("running seeded Prng cannot fail.");
+            .sample(&self.fuzzer.program)?
+            .expect("A seeded PRNG returned 'None' which indicates a fuzzer is ill-formed and implemented wrongly; please contact library's authors.");
 
         let mut result = self.eval(&value);
 
-        for label in result.logs() {
+        for s in result.logs() {
             // NOTE: There may be other log outputs that interefere with labels. So *by
             // convention*, we treat as label strings that starts with a NUL byte, which
             // should be a guard sufficient to prevent inadvertent clashes.
-            if label.starts_with('\0') {
+            if let Some(label) = PropertyTest::extract_label(&s) {
                 labels
-                    .entry(label.split_at(1).1.to_string())
+                    .entry(label)
                     .and_modify(|count| *count += 1)
                     .or_insert(1);
             }
@@ -291,8 +309,9 @@ impl PropertyTest {
                 choices: next_prng.choices(),
                 cache: Cache::new(|choices| {
                     match Prng::from_choices(choices).sample(&self.fuzzer.program) {
-                        None => Status::Invalid,
-                        Some((_, value)) => {
+                        Err(..) => Status::Invalid,
+                        Ok(None) => Status::Invalid,
+                        Ok(Some((_, value))) => {
                             let result = self.eval(&value);
 
                             let is_failure = result.failed(self.can_error);
@@ -315,9 +334,9 @@ impl PropertyTest {
                 counterexample.simplify();
             }
 
-            (next_prng, Some(counterexample))
+            Ok((next_prng, Some(counterexample)))
         } else {
-            (next_prng, None)
+            Ok((next_prng, None))
         }
     }
 
@@ -327,6 +346,14 @@ impl PropertyTest {
         Program::<NamedDeBruijn>::try_from(program)
             .unwrap()
             .eval(ExBudget::max())
+    }
+
+    fn extract_label(s: &str) -> Option<String> {
+        if s.starts_with('\0') {
+            Some(s.split_at(1).1.to_string())
+        } else {
+            None
+        }
     }
 }
 
@@ -417,14 +444,19 @@ impl Prng {
     }
 
     /// Generate a pseudo-random value from a fuzzer using the given PRNG.
-    pub fn sample(&self, fuzzer: &Program<Name>) -> Option<(Prng, PlutusData)> {
+    pub fn sample(
+        &self,
+        fuzzer: &Program<Name>,
+    ) -> Result<Option<(Prng, PlutusData)>, FuzzerError> {
         let program = Program::<NamedDeBruijn>::try_from(fuzzer.apply_data(self.uplc())).unwrap();
-        Prng::from_result(
-            program
-                .eval(ExBudget::max())
-                .result()
-                .expect("Fuzzer crashed?"),
-        )
+        let mut result = program.eval(ExBudget::max());
+        result
+            .result()
+            .map_err(|uplc_error| FuzzerError {
+                traces: result.logs(),
+                uplc_error,
+            })
+            .map(Prng::from_result)
     }
 
     /// Obtain a Prng back from a fuzzer execution. As a reminder, fuzzers have the following
@@ -549,10 +581,10 @@ impl<'a> Counterexample<'a> {
     ///
     /// - Deleting chunks
     /// - Transforming chunks into sequence of zeroes
-    /// - Decrementing chunks of values
-    /// - Replacing chunks of values
-    /// - Sorting chunks
-    /// - Redistribute values between nearby pairs
+    /// - Replacing chunks of values with smaller values
+    /// - Sorting chunks in ascending order
+    /// - Swapping nearby pairs
+    /// - Redistributing values between nearby pairs
     fn simplify(&mut self) {
         let mut prev;
 
@@ -609,37 +641,71 @@ impl<'a> Counterexample<'a> {
                 k /= 2
             }
 
-            // Now we try replacing region of choices with zeroes. Note that unlike the above we
-            // skip k = 1 because we handle that in the next step. Often (but not always) a block
-            // of all zeroes is the smallest value that a region can be.
-            let mut k: isize = 8;
-            while k > 1 {
-                let mut i: isize = self.choices.len() as isize - k;
-                while i >= 0 {
-                    let ivs = (i..i + k).map(|j| (j as usize, 0)).collect::<Vec<_>>();
-                    i -= if self.replace(ivs) { k } else { 1 }
+            if !self.choices.is_empty() {
+                // Now we try replacing region of choices with zeroes. Note that unlike the above we
+                // skip k = 1 because we handle that in the next step. Often (but not always) a block
+                // of all zeroes is the smallest value that a region can be.
+                let mut k = 8;
+                while k > 1 {
+                    let mut i = self.choices.len();
+                    while i >= k {
+                        let ivs = (i - k..i).map(|j| (j, 0)).collect::<Vec<_>>();
+                        i -= if self.replace(ivs) { k } else { 1 }
+                    }
+                    k /= 2
                 }
-                k /= 2
-            }
 
-            // Replace choices with smaller value, by doing a binary search. This will replace n
-            // with 0 or n - 1, if possible, but will also more efficiently replace it with, a
-            // smaller number than doing multiple subtractions would.
-            let (mut i, mut underflow) = if self.choices.is_empty() {
-                (0, true)
-            } else {
-                (self.choices.len() - 1, false)
-            };
-            while !underflow {
-                self.binary_search_replace(0, self.choices[i], |v| vec![(i, v)]);
-                (i, underflow) = i.overflowing_sub(1);
-            }
+                // Replace choices with smaller value, by doing a binary search. This will replace n
+                // with 0 or n - 1, if possible, but will also more efficiently replace it with, a
+                // smaller number than doing multiple subtractions would.
+                let (mut i, mut underflow) = (self.choices.len() - 1, false);
+                while !underflow {
+                    self.binary_search_replace(0, self.choices[i], |v| vec![(i, v)]);
+                    (i, underflow) = i.overflowing_sub(1);
+                }
 
-            // TODO: Remaining shrinking strategies...
-            //
-            // - Swaps
-            // - Sorting
-            // - Pair adjustments
+                // Sort out of orders chunks in ascending order
+                let mut k = 8;
+                while k > 1 {
+                    let mut i = self.choices.len() - 1;
+                    while i >= k {
+                        let (from, to) = (i - k, i);
+                        self.replace(
+                            (from..to)
+                                .zip(self.choices[from..to].iter().cloned().sorted())
+                                .collect(),
+                        );
+                        i -= 1;
+                    }
+                    k /= 2
+                }
+
+                // Try adjusting nearby pairs by:
+                //
+                // - Swapping them if they are out-of-order
+                // - Redistributing values between them.
+                for k in [2, 1] {
+                    let mut j = self.choices.len() - 1;
+                    while j >= k {
+                        let i = j - k;
+
+                        // Swap
+                        if self.choices[i] > self.choices[j] {
+                            self.replace(vec![(i, self.choices[j]), (j, self.choices[i])]);
+                        }
+
+                        let iv = self.choices[i];
+                        let jv = self.choices[j];
+
+                        // Replace
+                        if iv > 0 && jv <= u8::max_value() - iv {
+                            self.binary_search_replace(0, iv, |v| vec![(i, v), (j, jv + (iv - v))]);
+                        }
+
+                        j -= 1
+                    }
+                }
+            }
 
             // If we've reached a fixed point, then we cannot shrink further. We've reached a
             // (local) minimum, which is as good as a counterexample we'll get with this approach.
@@ -651,7 +717,6 @@ impl<'a> Counterexample<'a> {
 
     /// Try to replace a value with a smaller value by doing a binary search between
     /// two extremes. This converges relatively fast in order to shrink down values.
-    /// fast.
     fn binary_search_replace<F>(&mut self, lo: u8, hi: u8, f: F) -> u8
     where
         F: Fn(u8) -> Vec<(usize, u8)>,
@@ -798,7 +863,11 @@ impl<U, T> TestResult<U, T> {
         match self {
             TestResult::UnitTestResult(UnitTestResult { success, .. }) => *success,
             TestResult::PropertyTestResult(PropertyTestResult {
-                counterexample,
+                counterexample: Err(..),
+                ..
+            }) => false,
+            TestResult::PropertyTestResult(PropertyTestResult {
+                counterexample: Ok(counterexample),
                 test,
                 ..
             }) => {
@@ -829,10 +898,12 @@ impl<U, T> TestResult<U, T> {
         }
     }
 
-    pub fn logs(&self) -> &[String] {
+    pub fn traces(&self) -> &[String] {
         match self {
-            TestResult::UnitTestResult(UnitTestResult { ref logs, .. }) => logs.as_slice(),
-            TestResult::PropertyTestResult(..) => &[],
+            TestResult::UnitTestResult(UnitTestResult { ref traces, .. })
+            | TestResult::PropertyTestResult(PropertyTestResult { ref traces, .. }) => {
+                traces.as_slice()
+            }
         }
     }
 
@@ -862,8 +933,7 @@ impl<U, T> TestResult<U, T> {
 pub struct UnitTestResult<T> {
     pub success: bool,
     pub spent_budget: ExBudget,
-    pub output: Option<Term<NamedDeBruijn>>,
-    pub logs: Vec<String>,
+    pub traces: Vec<String>,
     pub test: UnitTest,
     pub assertion: Option<Assertion<T>>,
 }
@@ -878,8 +948,7 @@ impl UnitTestResult<(Constant, Rc<Type>)> {
         UnitTestResult {
             success: self.success,
             spent_budget: self.spent_budget,
-            output: self.output,
-            logs: self.logs,
+            traces: self.traces,
             test: self.test,
             assertion: self.assertion.and_then(|assertion| {
                 // No need to spend time/cpu on reifying assertions for successful
@@ -909,9 +978,10 @@ impl UnitTestResult<(Constant, Rc<Type>)> {
 #[derive(Debug)]
 pub struct PropertyTestResult<T> {
     pub test: PropertyTest,
-    pub counterexample: Option<T>,
+    pub counterexample: Result<Option<T>, uplc::machine::Error>,
     pub iterations: usize,
     pub labels: BTreeMap<String, usize>,
+    pub traces: Vec<String>,
 }
 
 unsafe impl<T> Send for PropertyTestResult<T> {}
@@ -922,13 +992,16 @@ impl PropertyTestResult<PlutusData> {
         data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
     ) -> PropertyTestResult<UntypedExpr> {
         PropertyTestResult {
-            counterexample: self.counterexample.map(|counterexample| {
-                UntypedExpr::reify_data(data_types, counterexample, &self.test.fuzzer.type_info)
-                    .expect("Failed to reify counterexample?")
+            counterexample: self.counterexample.map(|ok| {
+                ok.map(|counterexample| {
+                    UntypedExpr::reify_data(data_types, counterexample, &self.test.fuzzer.type_info)
+                        .expect("Failed to reify counterexample?")
+                })
             }),
             iterations: self.iterations,
             test: self.test,
             labels: self.labels,
+            traces: self.traces,
         }
     }
 }
@@ -1375,13 +1448,9 @@ mod test {
     impl PropertyTest {
         fn expect_failure(&self) -> Counterexample {
             let mut labels = BTreeMap::new();
-            match self.run_n_times(
-                PropertyTest::DEFAULT_MAX_SUCCESS,
-                Prng::from_seed(42),
-                None,
-                &mut labels,
-            ) {
-                Some((_, counterexample)) => counterexample,
+            let mut remaining = PropertyTest::DEFAULT_MAX_SUCCESS;
+            match self.run_n_times(&mut remaining, Prng::from_seed(42), &mut labels) {
+                Ok(Some(counterexample)) => counterexample,
                 _ => panic!("expected property to fail but it didn't."),
             }
         }
@@ -1473,8 +1542,8 @@ mod test {
 
         counterexample.simplify();
 
-        assert_eq!(counterexample.choices, vec![252, 149]);
-        assert_eq!(reify(counterexample.value), "(252, 149)");
+        assert_eq!(counterexample.choices, vec![149, 252]);
+        assert_eq!(reify(counterexample.value), "(149, 252)");
     }
 
     #[test]

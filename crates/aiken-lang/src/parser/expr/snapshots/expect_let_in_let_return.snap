@@ -16,12 +16,19 @@ Assignment {
                         numeric_underscore: false,
                     },
                 },
-                pattern: Var {
-                    location: 16..17,
-                    name: "b",
+                patterns: [
+                    AssignmentPattern {
+                        pattern: Var {
+                            location: 16..17,
+                            name: "b",
+                        },
+                        annotation: None,
+                        location: 16..17,
+                    },
+                ],
+                kind: Let {
+                    backpassing: false,
                 },
-                kind: Let,
-                annotation: None,
             },
             Var {
                 location: 25..26,
@@ -29,10 +36,17 @@ Assignment {
             },
         ],
     },
-    pattern: Var {
-        location: 4..5,
-        name: "a",
+    patterns: [
+        AssignmentPattern {
+            pattern: Var {
+                location: 4..5,
+                name: "a",
+            },
+            annotation: None,
+            location: 4..5,
+        },
+    ],
+    kind: Let {
+        backpassing: false,
     },
-    kind: Let,
-    annotation: None,
 }

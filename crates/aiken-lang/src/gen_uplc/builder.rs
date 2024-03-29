@@ -4,8 +4,8 @@ use super::{
 };
 use crate::{
     ast::{
-        AssignmentKind, BinOp, ClauseGuard, Constant, DataTypeKey, FunctionAccessKey, Pattern,
-        Span, TraceLevel, TypedArg, TypedClause, TypedClauseGuard, TypedDataType, TypedPattern,
+        BinOp, ClauseGuard, Constant, DataTypeKey, FunctionAccessKey, Pattern, Span, TraceLevel,
+        TypedArg, TypedAssignmentKind, TypedClause, TypedClauseGuard, TypedDataType, TypedPattern,
         UnOp,
     },
     builtins::{bool, data, function, int, list, void},
@@ -68,7 +68,7 @@ pub enum HoistableFunction {
 #[derive(Clone, Debug)]
 pub struct AssignmentProperties {
     pub value_type: Rc<Type>,
-    pub kind: AssignmentKind,
+    pub kind: TypedAssignmentKind,
     pub remove_unused: bool,
     pub full_check: bool,
     pub msg_func: Option<AirMsg>,
@@ -1192,8 +1192,19 @@ pub fn unknown_data_to_type_debug(
             .apply(term)
     } else if field_type.is_ml_result() {
         panic!("ML Result not supported")
-    } else {
+    } else if field_type.is_data() {
         term
+    } else {
+        Term::var("__val")
+            .delayed_choose_data(
+                Term::var("__val"),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+                error_term.clone(),
+            )
+            .lambda("__val")
+            .apply(term)
     }
 }
 

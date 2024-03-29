@@ -474,6 +474,34 @@ fn format_newline_module_comments() {
 }
 
 #[test]
+fn format_many_assignment_patterns() {
+    assert_format!(
+        r#"
+        fn backpassing() -> Int {
+
+          let
+            elem, accumulator, wow,
+            who,
+            thing,
+            what,
+            idk,
+            wee,
+            will,
+            it,
+            break,
+
+
+
+          <- fold([1, 2, 3],
+          0)
+
+          elem + accumulator
+        }
+        "#
+    );
+}
+
+#[test]
 fn format_bytearray_literals() {
     assert_format!(
         r#"
@@ -712,6 +740,39 @@ fn fail_expr() {
         r#"
         fn foo() {
           fail some_var
+        }
+        "#
+    );
+}
+
+#[test]
+fn fuzzer_annotations() {
+    assert_format!(
+        r#"
+        test foo(n: Int via int()) {
+          todo
+        }
+        "#
+    );
+}
+
+#[test]
+fn preserve_associativity_parens_in_binop() {
+    assert_format!(
+        r#"
+        pub fn bar() {
+          ( a || b ) || c
+        }
+        "#
+    );
+}
+
+#[test]
+fn superfluous_parens_in_binop() {
+    assert_format!(
+        r#"
+        pub fn bar() {
+          a && ( b && c )
         }
         "#
     );

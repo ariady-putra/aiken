@@ -25,12 +25,19 @@ Fn(
                     },
                 },
             },
-            pattern: Var {
-                location: 17..18,
-                name: "x",
+            patterns: [
+                AssignmentPattern {
+                    pattern: Var {
+                        location: 17..18,
+                        name: "x",
+                    },
+                    annotation: None,
+                    location: 17..18,
+                },
+            ],
+            kind: Let {
+                backpassing: false,
             },
-            kind: Let,
-            annotation: None,
         },
         doc: None,
         location: 0..8,
