@@ -205,6 +205,7 @@ fn str_to_keyword(word: &str) -> Option<Token> {
         "todo" => Some(Token::Todo),
         "type" => Some(Token::Type),
         "trace" => Some(Token::Trace),
+        "emit" => Some(Token::Emit),
         "test" => Some(Token::Test),
         // TODO: remove this in a future release
         "error" => Some(Token::Fail),
@@ -235,6 +236,34 @@ pub struct Function<T, Expr, Arg> {
     pub return_type: T,
     pub end_position: usize,
     pub can_error: bool,
+}
+
+impl TypedFunction {
+    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
+        self.arguments
+            .iter()
+            .find_map(|arg| arg.find_node(byte_index))
+            .or_else(|| self.body.find_node(byte_index))
+            .or_else(|| {
+                self.return_annotation
+                    .as_ref()
+                    .and_then(|a| a.find_node(byte_index))
+            })
+    }
+}
+
+impl TypedTest {
+    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
+        self.arguments
+            .iter()
+            .find_map(|arg| arg.find_node(byte_index))
+            .or_else(|| self.body.find_node(byte_index))
+            .or_else(|| {
+                self.return_annotation
+                    .as_ref()
+                    .and_then(|a| a.find_node(byte_index))
+            })
+    }
 }
 
 pub type TypedTypeAlias = TypeAlias<Rc<Type>>;
@@ -496,6 +525,18 @@ pub struct Validator<T, Expr> {
 }
 
 impl TypedValidator {
+    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
+        self.params
+            .iter()
+            .find_map(|arg| arg.find_node(byte_index))
+            .or_else(|| self.fun.find_node(byte_index))
+            .or_else(|| {
+                self.other_fun
+                    .as_ref()
+                    .and_then(|f| f.find_node(byte_index))
+            })
+    }
+
     pub fn into_function_definition<'a, F>(
         &'a self,
         module_name: &str,
@@ -592,43 +633,18 @@ impl TypedDefinition {
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
         // Note that the fn span covers the function head, not
         // the entire statement.
-        match self {
-            Definition::Validator(Validator {
-                fun: Function { body, .. },
-                other_fun:
-                    Some(Function {
-                        body: other_body, ..
-                    }),
-                ..
-            }) => {
-                if let Some(located) = body.find_node(byte_index) {
-                    return Some(located);
-                }
+        let located = match self {
+            Definition::Validator(validator) => validator.find_node(byte_index),
+            Definition::Fn(func) => func.find_node(byte_index),
+            Definition::Test(func) => func.find_node(byte_index),
+            _ => None,
+        };
 
-                if let Some(located) = other_body.find_node(byte_index) {
-                    return Some(located);
-                }
-            }
-
-            Definition::Fn(Function { body, .. })
-            | Definition::Test(Function { body, .. })
-            | Definition::Validator(Validator {
-                fun: Function { body, .. },
-                ..
-            }) => {
-                if let Some(located) = body.find_node(byte_index) {
-                    return Some(located);
-                }
-            }
-
-            _ => (),
+        if located.is_none() && self.location().contains(byte_index) {
+            return Some(Located::Definition(self));
         }
 
-        if self.location().contains(byte_index) {
-            Some(Located::Definition(self))
-        } else {
-            None
-        }
+        located
     }
 }
 
@@ -637,20 +653,22 @@ pub enum Located<'a> {
     Expression(&'a TypedExpr),
     Pattern(&'a TypedPattern, Rc<Type>),
     Definition(&'a TypedDefinition),
+    Argument(&'a ArgName, Rc<Type>),
+    Annotation(&'a Annotation),
 }
 
 impl<'a> Located<'a> {
     pub fn definition_location(&self) -> Option<DefinitionLocation<'_>> {
         match self {
             Self::Expression(expression) => expression.definition_location(),
-            // TODO: Revise definition location semantic for 'Pattern'
-            // e.g. for constructors, we might want to show the type definition
-            // for that constructor.
-            Self::Pattern(_, _) => None,
             Self::Definition(definition) => Some(DefinitionLocation {
                 module: None,
                 span: definition.location(),
             }),
+            // TODO: Revise definition location semantic for 'Pattern'
+            // e.g. for constructors, we might want to show the type definition
+            // for that constructor.
+            Self::Pattern(_, _) | Located::Argument(_, _) | Located::Annotation(_) => None,
         }
     }
 }
@@ -811,6 +829,18 @@ impl<A> Arg<A> {
     }
 }
 
+impl TypedArg {
+    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
+        if self.arg_name.location().contains(byte_index) {
+            Some(Located::Argument(&self.arg_name, self.tipo.clone()))
+        } else {
+            self.annotation
+                .as_ref()
+                .and_then(|annotation| annotation.find_node(byte_index))
+        }
+    }
+}
+
 pub type TypedArgVia = ArgVia<Rc<Type>, TypedExpr>;
 pub type UntypedArgVia = ArgVia<(), UntypedExpr>;
 
@@ -835,6 +865,23 @@ impl<T, Ann> From<ArgVia<T, Ann>> for Arg<T> {
     }
 }
 
+impl TypedArgVia {
+    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
+        if self.arg_name.location().contains(byte_index) {
+            Some(Located::Argument(&self.arg_name, self.tipo.clone()))
+        } else {
+            // `via` is done first here because when there is no manually written
+            // annotation, it seems one is injected leading to a `found` returning too early
+            // because the span of the filled in annotation matches the span of the via expr.
+            self.via.find_node(byte_index).or_else(|| {
+                self.annotation
+                    .as_ref()
+                    .and_then(|annotation| annotation.find_node(byte_index))
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArgName {
     Discarded {
@@ -851,6 +898,15 @@ pub enum ArgName {
 }
 
 impl ArgName {
+    pub fn location(&self) -> Span {
+        match self {
+            ArgName::Discarded { location, .. } => *location,
+            ArgName::Named { location, .. } => *location,
+        }
+    }
+
+    /// Returns the name of the variable if it is named, otherwise None.
+    /// Code gen uses the fact that this returns None to do certain things.
     pub fn get_variable_name(&self) -> Option<&str> {
         match self {
             ArgName::Discarded { .. } => None,
@@ -858,10 +914,15 @@ impl ArgName {
         }
     }
 
+    pub fn get_name(&self) -> String {
+        match self {
+            ArgName::Discarded { name, .. } | ArgName::Named { name, .. } => name.clone(),
+        }
+    }
+
     pub fn get_label(&self) -> String {
         match self {
-            ArgName::Discarded { label, .. } => label.to_string(),
-            ArgName::Named { label, .. } => label.to_string(),
+            ArgName::Discarded { label, .. } | ArgName::Named { label, .. } => label.to_string(),
         }
     }
 }
@@ -1021,6 +1082,28 @@ impl Annotation {
                 _ => false,
             },
         }
+    }
+
+    pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
+        if !self.location().contains(byte_index) {
+            return None;
+        }
+
+        let located = match self {
+            Annotation::Constructor { arguments, .. } => {
+                arguments.iter().find_map(|arg| arg.find_node(byte_index))
+            }
+            Annotation::Fn { arguments, ret, .. } => arguments
+                .iter()
+                .find_map(|arg| arg.find_node(byte_index))
+                .or_else(|| ret.find_node(byte_index)),
+            Annotation::Tuple { elems, .. } => {
+                elems.iter().find_map(|arg| arg.find_node(byte_index))
+            }
+            Annotation::Var { .. } | Annotation::Hole { .. } => None,
+        };
+
+        located.or(Some(Located::Annotation(self)))
     }
 }
 
@@ -1731,6 +1814,7 @@ pub enum TraceKind {
     Trace,
     Todo,
     Error,
+    Emit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1927,7 +2011,7 @@ pub enum Error {
     #[diagnostic(code("illegal::module_name"))]
     #[diagnostic(help(r#"You cannot use keywords as part of a module path name. As a quick reminder, here's a list of all the keywords (and thus, of invalid module path names):
 
-    as, expect, check, const, else, fn, if, is, let, opaque, pub, test, todo, trace, type, use, when"#))]
+    as, expect, check, const, else, fn, if, is, let, opaque, pub, test, todo, trace, emit, type, use, when"#))]
     KeywordInModuleName { name: String, keyword: String },
 
     #[error("I realized you used '{}' as a module name, which is reserved (and not available).\n",

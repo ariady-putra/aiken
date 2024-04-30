@@ -583,7 +583,7 @@ impl<'comments> Formatter<'comments> {
         let fun_doc_comments = self.doc_comments(fun.location.start);
         let first_fn = self
             .definition_fn(
-                &false,
+                &fun.public,
                 &fun.name,
                 &fun.arguments,
                 &fun.return_annotation,
@@ -601,7 +601,7 @@ impl<'comments> Formatter<'comments> {
 
                 let other_fn = self
                     .definition_fn(
-                        &false,
+                        &other.public,
                         &other.name,
                         &other.arguments,
                         &other.return_annotation,
@@ -1020,6 +1020,7 @@ impl<'comments> Formatter<'comments> {
             TraceKind::Trace => ("trace", None),
             TraceKind::Error => ("fail", Some(DEFAULT_ERROR_STR.to_string())),
             TraceKind::Todo => ("todo", Some(DEFAULT_TODO_STR.to_string())),
+            TraceKind::Emit => ("emit", None),
         };
 
         let body = match text {
@@ -1035,7 +1036,7 @@ impl<'comments> Formatter<'comments> {
 
         match kind {
             TraceKind::Error | TraceKind::Todo => body,
-            TraceKind::Trace => body
+            TraceKind::Trace | TraceKind::Emit => body
                 .append(if self.pop_empty_lines(then.start_byte_index()) {
                     lines(2)
                 } else {

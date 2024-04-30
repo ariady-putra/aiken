@@ -3,6 +3,7 @@ pub mod config;
 pub mod deps;
 pub mod docs;
 pub mod error;
+pub mod export;
 pub mod format;
 pub mod github;
 pub mod module;
@@ -34,13 +35,14 @@ use aiken_lang::{
         DataTypeKey, Definition, FunctionAccessKey, ModuleKind, Tracing, TypedDataType,
         TypedFunction,
     },
-    builtins,
+    builtins::{self},
     expr::UntypedExpr,
     gen_uplc::CodeGenerator,
     line_numbers::LineNumbers,
     tipo::{Type, TypeInfo},
     IdGenerator,
 };
+use export::Export;
 use indexmap::IndexMap;
 use miette::NamedSource;
 use options::{CodeGenMode, Options};
@@ -462,6 +464,27 @@ where
                 Ok(validator_hash)
             }
         })
+    }
+
+    pub fn export(&self, module: &str, name: &str, tracing: Tracing) -> Result<Export, Error> {
+        self.checked_modules
+            .get(module)
+            .and_then(|checked_module| {
+                checked_module.ast.definitions().find_map(|def| match def {
+                    Definition::Fn(func) if func.name == name => Some((checked_module, func)),
+                    _ => None,
+                })
+            })
+            .map(|(checked_module, func)| {
+                let mut generator = self.new_generator(tracing);
+
+                Export::from_function(func, checked_module, &mut generator, &self.checked_modules)
+            })
+            .transpose()?
+            .ok_or_else(|| Error::ExportNotFound {
+                module: module.to_string(),
+                name: name.to_string(),
+            })
     }
 
     pub fn construct_parameter_incrementally<F>(

@@ -116,6 +116,13 @@ pub enum TypedExpr {
         text: Box<Self>,
     },
 
+    Emit {
+        location: Span,
+        tipo: Rc<Type>,
+        then: Box<Self>,
+        text: Box<Self>,
+    },
+
     When {
         location: Span,
         tipo: Rc<Type>,
@@ -196,6 +203,7 @@ impl TypedExpr {
         match self {
             Self::Var { constructor, .. } => constructor.tipo.clone(),
             Self::Trace { then, .. } => then.tipo(),
+            Self::Emit { then, .. } => then.tipo(),
             Self::Fn { tipo, .. }
             | Self::UInt { tipo, .. }
             | Self::ErrorTerm { tipo, .. }
@@ -241,6 +249,7 @@ impl TypedExpr {
             TypedExpr::Fn { .. }
             | TypedExpr::UInt { .. }
             | TypedExpr::Trace { .. }
+            | TypedExpr::Emit { .. }
             | TypedExpr::List { .. }
             | TypedExpr::Call { .. }
             | TypedExpr::When { .. }
@@ -283,6 +292,7 @@ impl TypedExpr {
             | Self::UInt { location, .. }
             | Self::Var { location, .. }
             | Self::Trace { location, .. }
+            | Self::Emit { location, .. }
             | Self::ErrorTerm { location, .. }
             | Self::When { location, .. }
             | Self::Call { location, .. }
@@ -318,6 +328,7 @@ impl TypedExpr {
             Self::Fn { location, .. }
             | Self::UInt { location, .. }
             | Self::Trace { location, .. }
+            | Self::Emit { location, .. }
             | Self::Var { location, .. }
             | Self::ErrorTerm { location, .. }
             | Self::When { location, .. }
@@ -361,6 +372,11 @@ impl TypedExpr {
                 .or_else(|| then.find_node(byte_index))
                 .or(Some(Located::Expression(self))),
 
+            TypedExpr::Emit { text, then, .. } => text
+                .find_node(byte_index)
+                .or_else(|| then.find_node(byte_index))
+                .or(Some(Located::Expression(self))),
+
             TypedExpr::Pipeline { expressions, .. } | TypedExpr::Sequence { expressions, .. } => {
                 expressions.iter().find_map(|e| e.find_node(byte_index))
             }
@@ -371,10 +387,15 @@ impl TypedExpr {
 
             TypedExpr::Tuple {
                 elems: elements, ..
-            }
-            | TypedExpr::List { elements, .. } => elements
+            } => elements
                 .iter()
                 .find_map(|e| e.find_node(byte_index))
+                .or(Some(Located::Expression(self))),
+
+            TypedExpr::List { elements, tail, .. } => elements
+                .iter()
+                .find_map(|e| e.find_node(byte_index))
+                .or_else(|| tail.as_ref().and_then(|t| t.find_node(byte_index)))
                 .or(Some(Located::Expression(self))),
 
             TypedExpr::Call { fun, args, .. } => args

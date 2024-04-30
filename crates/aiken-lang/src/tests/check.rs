@@ -95,8 +95,6 @@ fn bls12_381_ml_result_in_data_type() {
 
     let res = check(parse(source_code));
 
-    dbg!(&res);
-
     assert!(matches!(res, Err((_, Error::IllegalTypeInData { .. }))))
 }
 
@@ -1912,7 +1910,7 @@ fn forbid_partial_down_casting() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((_, Error::CouldNotUnify { .. }))
     ))
 }
@@ -1931,7 +1929,7 @@ fn forbid_partial_up_casting() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((_, Error::CouldNotUnify { .. }))
     ))
 }
@@ -2209,4 +2207,91 @@ fn allow_discard_for_backpassing_args() {
     let (warnings, _ast) = check(parse(source_code)).unwrap();
 
     assert_eq!(warnings.len(), 0);
+}
+
+#[test]
+fn validator_private_type_leak() {
+    let source_code = r#"
+        type Datum {
+          foo: Int,
+        }
+
+        type Redeemer {
+          bar: Int,
+        }
+
+        validator {
+          pub fn bar(datum: Datum, redeemer: Redeemer, _ctx) {
+            datum.foo == redeemer.bar
+          }
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::PrivateTypeLeak { .. }))
+    ))
+}
+
+#[test]
+fn validator_public() {
+    let source_code = r#"
+        pub type Datum {
+          foo: Int,
+        }
+
+        pub type Redeemer {
+          bar: Int,
+        }
+
+        validator {
+          pub fn bar(datum: Datum, redeemer: Redeemer, _ctx) {
+            datum.foo == redeemer.bar
+          }
+        }
+    "#;
+
+    assert!(check_validator(parse(source_code)).is_ok())
+}
+
+#[test]
+fn validator_private_everything() {
+    let source_code = r#"
+        type Datum {
+          foo: Int,
+        }
+
+        type Redeemer {
+          bar: Int,
+        }
+
+        validator {
+          fn bar(datum: Datum, redeemer: Redeemer, _ctx) {
+            datum.foo == redeemer.bar
+          }
+        }
+    "#;
+
+    assert!(check_validator(parse(source_code)).is_ok())
+}
+
+#[test]
+fn tuple_access_on_call() {
+    let source_code = r#"
+        use aiken/builtin
+
+        pub fn list_at(xs: List<a>, index: Int) -> a {
+          if index == 0 {
+            builtin.head_list(xs)
+          } else {
+            list_at(builtin.tail_list(xs), index - 1)
+          }
+        }
+
+        fn foo() {
+          [list_at([(1, 2)], 0).2nd, ..[1, 2]]
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
 }
