@@ -3,7 +3,7 @@ use std::{cmp::Ordering, iter, ops::Neg, rc::Rc, vec};
 use indexmap::IndexMap;
 use itertools::Itertools;
 
-use pallas::ledger::primitives::babbage::{BigInt, PlutusData};
+use pallas_primitives::babbage::{BigInt, PlutusData};
 
 use crate::{
     ast::{Constant, Data, Name, NamedDeBruijn, Program, Term, Type},
@@ -199,6 +199,146 @@ impl DefaultFunction {
                 | DefaultFunction::ConstrData
         )
     }
+
+    pub fn is_error_safe(self, arg_stack: &[&Term<Name>]) -> bool {
+        match self {
+            DefaultFunction::AddInteger
+            | DefaultFunction::SubtractInteger
+            | DefaultFunction::MultiplyInteger
+            | DefaultFunction::EqualsInteger
+            | DefaultFunction::LessThanInteger
+            | DefaultFunction::LessThanEqualsInteger => arg_stack.iter().all(|arg| {
+                if let Term::Constant(c) = arg {
+                    matches!(c.as_ref(), Constant::Integer(_))
+                } else {
+                    false
+                }
+            }),
+            DefaultFunction::DivideInteger
+            | DefaultFunction::ModInteger
+            | DefaultFunction::QuotientInteger
+            | DefaultFunction::RemainderInteger => arg_stack.iter().all(|arg| {
+                if let Term::Constant(c) = arg {
+                    if let Constant::Integer(i) = c.as_ref() {
+                        *i != 0.into()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }),
+            DefaultFunction::EqualsByteString
+            | DefaultFunction::AppendByteString
+            | DefaultFunction::LessThanEqualsByteString
+            | DefaultFunction::LessThanByteString => arg_stack.iter().all(|arg| {
+                if let Term::Constant(c) = arg {
+                    matches!(c.as_ref(), Constant::ByteString(_))
+                } else {
+                    false
+                }
+            }),
+
+            DefaultFunction::ConsByteString => {
+                if let (Term::Constant(c), Term::Constant(c2)) = (&arg_stack[0], &arg_stack[1]) {
+                    if let (Constant::Integer(i), Constant::ByteString(_)) =
+                        (c.as_ref(), c2.as_ref())
+                    {
+                        i >= &0.into() && i < &256.into()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+
+            DefaultFunction::SliceByteString => {
+                if let (Term::Constant(c), Term::Constant(c2), Term::Constant(c3)) =
+                    (&arg_stack[0], &arg_stack[1], &arg_stack[2])
+                {
+                    matches!(
+                        (c.as_ref(), c2.as_ref(), c3.as_ref()),
+                        (
+                            Constant::Integer(_),
+                            Constant::Integer(_),
+                            Constant::ByteString(_)
+                        )
+                    )
+                } else {
+                    false
+                }
+            }
+
+            DefaultFunction::IndexByteString => {
+                if let (Term::Constant(c), Term::Constant(c2)) = (&arg_stack[0], &arg_stack[1]) {
+                    if let (Constant::ByteString(bs), Constant::Integer(i)) =
+                        (c.as_ref(), c2.as_ref())
+                    {
+                        i >= &0.into() && i < &bs.len().into()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+
+            DefaultFunction::EqualsString | DefaultFunction::AppendString => {
+                arg_stack.iter().all(|arg| {
+                    if let Term::Constant(c) = arg {
+                        matches!(c.as_ref(), Constant::String(_))
+                    } else {
+                        false
+                    }
+                })
+            }
+
+            DefaultFunction::EqualsData => arg_stack.iter().all(|arg| {
+                if let Term::Constant(c) = arg {
+                    matches!(c.as_ref(), Constant::Data(_))
+                } else {
+                    false
+                }
+            }),
+
+            DefaultFunction::Bls12_381_G1_Equal | DefaultFunction::Bls12_381_G1_Add => {
+                arg_stack.iter().all(|arg| {
+                    if let Term::Constant(c) = arg {
+                        matches!(c.as_ref(), Constant::Bls12_381G1Element(_))
+                    } else {
+                        false
+                    }
+                })
+            }
+
+            DefaultFunction::Bls12_381_G2_Equal | DefaultFunction::Bls12_381_G2_Add => {
+                arg_stack.iter().all(|arg| {
+                    if let Term::Constant(c) = arg {
+                        matches!(c.as_ref(), Constant::Bls12_381G2Element(_))
+                    } else {
+                        false
+                    }
+                })
+            }
+
+            DefaultFunction::ConstrData => {
+                if let (Term::Constant(c), Term::Constant(c2)) = (&arg_stack[0], &arg_stack[1]) {
+                    if let (Constant::Integer(i), Constant::ProtoList(Type::Data, _)) =
+                        (c.as_ref(), c2.as_ref())
+                    {
+                        i >= &0.into()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+
+            _ => false,
+        }
+    }
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -219,10 +359,12 @@ pub enum BuiltinArgs {
 }
 
 impl BuiltinArgs {
-    fn args_from_arg_stack(stack: Vec<(usize, Term<Name>)>, is_order_agnostic: bool) -> Self {
+    fn args_from_arg_stack(stack: Vec<(usize, Term<Name>)>, func: DefaultFunction) -> Self {
+        let error_safe = func.is_error_safe(&stack.iter().map(|(_, term)| term).collect_vec());
+
         let mut ordered_arg_stack = stack.into_iter().sorted_by(|(_, arg1), (_, arg2)| {
             // sort by constant first if the builtin is order agnostic
-            if is_order_agnostic {
+            if func.is_order_agnostic_builtin() {
                 if matches!(arg1, Term::Constant(_)) == matches!(arg2, Term::Constant(_)) {
                     Ordering::Equal
                 } else if matches!(arg1, Term::Constant(_)) {
@@ -235,23 +377,35 @@ impl BuiltinArgs {
             }
         });
 
-        if ordered_arg_stack.len() == 2 && is_order_agnostic {
+        if ordered_arg_stack.len() == 2 && func.is_order_agnostic_builtin() {
             // This is the special case where the order of args is irrelevant to the builtin
             // An example is addInteger or multiplyInteger
             BuiltinArgs::TwoArgsAnyOrder {
                 fst: ordered_arg_stack.next().unwrap(),
-                snd: ordered_arg_stack.next(),
+                snd: if error_safe {
+                    ordered_arg_stack.next()
+                } else {
+                    None
+                },
             }
         } else if ordered_arg_stack.len() == 2 {
             BuiltinArgs::TwoArgs {
                 fst: ordered_arg_stack.next().unwrap(),
-                snd: ordered_arg_stack.next(),
+                snd: if error_safe {
+                    ordered_arg_stack.next()
+                } else {
+                    None
+                },
             }
         } else {
             BuiltinArgs::ThreeArgs {
                 fst: ordered_arg_stack.next().unwrap(),
                 snd: ordered_arg_stack.next(),
-                thd: ordered_arg_stack.next(),
+                thd: if error_safe {
+                    ordered_arg_stack.next()
+                } else {
+                    None
+                },
             }
         }
     }
@@ -803,7 +957,8 @@ impl Term<Name> {
                         with,
                         inline_lambda,
                     );
-                    with(None, self, vec![], scope);
+
+                    with(None, self, args, scope);
                 }
             }
 
@@ -1359,13 +1514,10 @@ impl Program<Name> {
             self.traverse_uplc_with(false, &mut |_id, term, arg_stack, scope| match term {
                 Term::Builtin(func) => {
                     if func.can_curry_builtin() && arg_stack.len() == func.arity() {
-                        let is_order_agnostic = func.is_order_agnostic_builtin();
-
                         // In the case of order agnostic builtins we want to sort the args by constant first
                         // This gives us the opportunity to curry constants that often pop up in the code
 
-                        let builtin_args =
-                            BuiltinArgs::args_from_arg_stack(arg_stack, is_order_agnostic);
+                        let builtin_args = BuiltinArgs::args_from_arg_stack(arg_stack, *func);
 
                         // First we see if we have already curried this builtin before
                         let mut id_vec = if let Some((index, _)) =
@@ -1479,10 +1631,7 @@ impl Program<Name> {
                             arg_stack.reverse();
                         }
 
-                        let builtin_args = BuiltinArgs::args_from_arg_stack(
-                            arg_stack,
-                            func.is_order_agnostic_builtin(),
-                        );
+                        let builtin_args = BuiltinArgs::args_from_arg_stack(arg_stack, *func);
 
                         let Some(mut id_vec) = curried_builtin.get_id_args(&builtin_args) else {
                             return;
@@ -1593,14 +1742,14 @@ fn var_occurrences(
             if parameter_name.text == NO_INLINE {
                 var_occurrences(body.as_ref(), search_for, arg_stack, force_stack)
                     .no_inline_if_found()
-            } else if parameter_name.text != search_for.text
-                || parameter_name.unique != search_for.unique
+            } else if parameter_name.text == search_for.text
+                && parameter_name.unique == search_for.unique
             {
+                VarLookup::new()
+            } else {
                 let not_applied: isize = isize::from(arg_stack.pop().is_none());
                 var_occurrences(body.as_ref(), search_for, arg_stack, force_stack)
                     .delay_if_found(not_applied)
-            } else {
-                VarLookup::new()
             }
         }
         Term::Apply { function, argument } => {
@@ -1645,15 +1794,15 @@ fn substitute_var(term: &Term<Name>, original: Rc<Name>, replace_with: &Term<Nam
             parameter_name,
             body,
         } => {
-            if parameter_name.text != original.text || parameter_name.unique != original.unique {
+            if parameter_name.text == original.text && parameter_name.unique == original.unique {
                 Term::Lambda {
                     parameter_name: parameter_name.clone(),
-                    body: substitute_var(body.as_ref(), original, replace_with).into(),
+                    body: body.clone(),
                 }
             } else {
                 Term::Lambda {
                     parameter_name: parameter_name.clone(),
-                    body: body.clone(),
+                    body: substitute_var(body.as_ref(), original, replace_with).into(),
                 }
             }
         }
@@ -1675,15 +1824,15 @@ fn replace_identity_usage(term: &Term<Name>, original: Rc<Name>) -> Term<Name> {
             parameter_name,
             body,
         } => {
-            if parameter_name.text != original.text || parameter_name.unique != original.unique {
+            if parameter_name.text == original.text && parameter_name.unique == original.unique {
                 Term::Lambda {
                     parameter_name: parameter_name.clone(),
-                    body: Rc::new(replace_identity_usage(body.as_ref(), original)),
+                    body: body.clone(),
                 }
             } else {
                 Term::Lambda {
                     parameter_name: parameter_name.clone(),
-                    body: body.clone(),
+                    body: Rc::new(replace_identity_usage(body.as_ref(), original)),
                 }
             }
         }
@@ -1758,7 +1907,7 @@ fn pop_lambdas_and_get_names(term: &Term<Name>) -> (Vec<Rc<Name>>, &Term<Name>) 
 #[cfg(test)]
 mod tests {
 
-    use pallas::ledger::primitives::babbage::{BigInt, PlutusData};
+    use pallas_primitives::babbage::{BigInt, PlutusData};
     use pretty_assertions::assert_eq;
 
     use crate::{
@@ -2664,6 +2813,81 @@ mod tests {
                 )
                 .constr_index_exposer()
                 .constr_fields_exposer(),
+        };
+
+        compare_optimization(expected, program, |p| p.builtin_curry_reducer());
+    }
+
+    #[test]
+    fn curry_reducer_test_4() {
+        let program: Program<Name> = Program {
+            version: (1, 0, 0),
+            term: Term::bool(true)
+                .delayed_if_then_else(
+                    Term::integer(2.into()),
+                    Term::add_integer()
+                        .apply(
+                            Term::add_integer()
+                                .apply(Term::var("x"))
+                                .apply(Term::var("y")),
+                        )
+                        .apply(Term::var("z"))
+                        .lambda("z")
+                        .apply(
+                            Term::index_bytearray()
+                                .apply(Term::byte_string(vec![
+                                    1, 2, 4, 8, 16, 32, 64, 128, 255, 255,
+                                ]))
+                                .apply(Term::integer(35.into())),
+                        )
+                        .lambda("y")
+                        .apply(
+                            Term::index_bytearray()
+                                .apply(Term::byte_string(vec![
+                                    1, 2, 4, 8, 16, 32, 64, 128, 255, 255,
+                                ]))
+                                .apply(Term::integer(35.into())),
+                        ),
+                )
+                .lambda("x")
+                .apply(
+                    Term::bool(true).delayed_if_then_else(
+                        Term::integer(1.into()),
+                        Term::index_bytearray()
+                            .apply(Term::byte_string(vec![
+                                1, 2, 4, 8, 16, 32, 64, 128, 255, 255,
+                            ]))
+                            .apply(Term::integer(35.into())),
+                    ),
+                ),
+        };
+
+        let expected = Program {
+            version: (1, 0, 0),
+            term: Term::bool(true)
+                .delayed_if_then_else(
+                    Term::integer(2.into()),
+                    Term::add_integer()
+                        .apply(
+                            Term::add_integer()
+                                .apply(Term::var("x"))
+                                .apply(Term::var("y")),
+                        )
+                        .apply(Term::var("z"))
+                        .lambda("z")
+                        .apply(Term::var("good_curry").apply(Term::integer(35.into())))
+                        .lambda("y")
+                        .apply(Term::var("good_curry").apply(Term::integer(35.into()))),
+                )
+                .lambda("x")
+                .apply(Term::bool(true).delayed_if_then_else(
+                    Term::integer(1.into()),
+                    Term::var("good_curry").apply(Term::integer(35.into())),
+                ))
+                .lambda("good_curry")
+                .apply(Term::index_bytearray().apply(Term::byte_string(vec![
+                    1, 2, 4, 8, 16, 32, 64, 128, 255, 255,
+                ]))),
         };
 
         compare_optimization(expected, program, |p| p.builtin_curry_reducer());

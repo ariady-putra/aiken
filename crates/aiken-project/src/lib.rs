@@ -35,10 +35,11 @@ use aiken_lang::{
         DataTypeKey, Definition, FunctionAccessKey, ModuleKind, Tracing, TypedDataType,
         TypedFunction,
     },
-    builtins::{self},
+    builtins,
     expr::UntypedExpr,
     gen_uplc::CodeGenerator,
     line_numbers::LineNumbers,
+    plutus_version::PlutusVersion,
     tipo::{Type, TypeInfo},
     IdGenerator,
 };
@@ -49,7 +50,7 @@ use options::{CodeGenMode, Options};
 use package_name::PackageName;
 use pallas::ledger::{
     addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, StakePayload},
-    primitives::babbage::{self as cardano, PolicyId},
+    primitives::conway::{self as cardano, PolicyId},
     traverse::ComputeHash,
 };
 use std::{
@@ -141,6 +142,7 @@ where
 
     pub fn new_generator(&'_ self, tracing: Tracing) -> CodeGenerator<'_> {
         CodeGenerator::new(
+            self.config.plutus,
             utils::indexmap::as_ref_values(&self.functions),
             utils::indexmap::as_ref_values(&self.data_types),
             utils::indexmap::as_str_ref_values(&self.module_types),
@@ -422,6 +424,7 @@ where
             }
 
             let n = validator.parameters.len();
+
             if n > 0 {
                 Err(blueprint::error::Error::ParameterizedValidator { n }.into())
             } else {
@@ -431,9 +434,11 @@ where
                     Network::Testnet
                 };
 
-                Ok(validator
-                    .program
-                    .address(network, delegation_part.to_owned()))
+                Ok(validator.program.address(
+                    network,
+                    delegation_part.to_owned(),
+                    &self.config.plutus.into(),
+                ))
             }
         })
     }
@@ -460,7 +465,13 @@ where
                 Err(blueprint::error::Error::ParameterizedValidator { n }.into())
             } else {
                 let cbor = validator.program.to_cbor().unwrap();
-                let validator_hash = cardano::PlutusV2Script(cbor.into()).compute_hash();
+
+                let validator_hash = match self.config.plutus {
+                    PlutusVersion::V1 => cardano::PlutusV1Script(cbor.into()).compute_hash(),
+                    PlutusVersion::V2 => cardano::PlutusV2Script(cbor.into()).compute_hash(),
+                    PlutusVersion::V3 => cardano::PlutusV3Script(cbor.into()).compute_hash(),
+                };
+
                 Ok(validator_hash)
             }
         })
@@ -625,7 +636,7 @@ where
                     match aiken_lang::parser::module(&code, kind) {
                         Ok((mut ast, extra)) => {
                             // Store the name
-                            ast.name = name.clone();
+                            ast.name.clone_from(&name);
 
                             let module = ParsedModule {
                                 kind,
@@ -842,11 +853,15 @@ where
 
         let data_types = utils::indexmap::as_ref_values(&self.data_types);
 
+        let plutus_version = &self.config.plutus;
+
         tests
             .into_par_iter()
             .map(|test| match test {
-                Test::UnitTest(unit_test) => unit_test.run(),
-                Test::PropertyTest(property_test) => property_test.run(seed, property_max_success),
+                Test::UnitTest(unit_test) => unit_test.run(plutus_version),
+                Test::PropertyTest(property_test) => {
+                    property_test.run(seed, property_max_success, plutus_version)
+                }
             })
             .collect::<Vec<TestResult<(Constant, Rc<Type>), PlutusData>>>()
             .into_iter()
@@ -855,19 +870,27 @@ where
     }
 
     fn aiken_files(&mut self, dir: &Path, kind: ModuleKind) -> Result<(), Error> {
-        let paths = walkdir::WalkDir::new(dir)
+        walkdir::WalkDir::new(dir)
             .follow_links(true)
             .into_iter()
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
-            .map(|d| d.into_path())
-            .filter(move |d| is_aiken_path(d, dir));
+            .try_for_each(|d| {
+                let path = d.into_path();
+                let keep = is_aiken_path(&path, dir);
+                let ext = path.extension();
 
-        for path in paths {
-            self.add_module(path, dir, kind)?;
-        }
+                if !keep && ext.unwrap_or_default() == "ak" {
+                    self.warnings
+                        .push(Warning::InvalidModuleName { path: path.clone() });
+                }
 
-        Ok(())
+                if keep {
+                    self.add_module(path, dir, kind)
+                } else {
+                    Ok(())
+                }
+            })
     }
 
     fn add_module(&mut self, path: PathBuf, dir: &Path, kind: ModuleKind) -> Result<(), Error> {

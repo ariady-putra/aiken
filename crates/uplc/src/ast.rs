@@ -11,14 +11,12 @@ use crate::{
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use pallas::ledger::{
-    addresses::{Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
-    primitives::{
-        alonzo::{self, Constr, PlutusData},
-        babbage::{self, Language},
-    },
-    traverse::ComputeHash,
+use pallas_addresses::{Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart};
+use pallas_primitives::{
+    alonzo::{self, Constr, PlutusData},
+    conway::{self, Language},
 };
+use pallas_traverse::ComputeHash;
 use serde::{
     self,
     de::{self, Deserialize, Deserializer, MapAccess, Visitor},
@@ -118,7 +116,7 @@ impl Serialize for Program<DeBruijn> {
         let cbor = self.to_cbor().unwrap();
         let mut s = serializer.serialize_struct("Program<DeBruijn>", 2)?;
         s.serialize_field("compiledCode", &hex::encode(&cbor))?;
-        s.serialize_field("hash", &babbage::PlutusV2Script(cbor.into()).compute_hash())?;
+        s.serialize_field("hash", &conway::PlutusV2Script(cbor.into()).compute_hash())?;
         s.end()
     }
 }
@@ -177,10 +175,19 @@ impl<'a> Deserialize<'a> for Program<DeBruijn> {
 }
 
 impl Program<DeBruijn> {
-    pub fn address(&self, network: Network, delegation: ShelleyDelegationPart) -> ShelleyAddress {
+    pub fn address(
+        &self,
+        network: Network,
+        delegation: ShelleyDelegationPart,
+        plutus_version: &Language,
+    ) -> ShelleyAddress {
         let cbor = self.to_cbor().unwrap();
 
-        let validator_hash = babbage::PlutusV2Script(cbor.into()).compute_hash();
+        let validator_hash = match plutus_version {
+            Language::PlutusV1 => conway::PlutusV1Script(cbor.into()).compute_hash(),
+            Language::PlutusV2 => conway::PlutusV2Script(cbor.into()).compute_hash(),
+            Language::PlutusV3 => conway::PlutusV3Script(cbor.into()).compute_hash(),
+        };
 
         ShelleyAddress::new(
             network,
@@ -295,7 +302,7 @@ pub struct Data;
 impl Data {
     pub fn to_hex(data: PlutusData) -> String {
         let mut bytes = Vec::new();
-        pallas::codec::minicbor::Encoder::new(&mut bytes)
+        pallas_codec::minicbor::Encoder::new(&mut bytes)
             .encode(data)
             .expect("failed to encode Plutus Data as cbor?");
         hex::encode(bytes)
@@ -749,18 +756,13 @@ impl Program<NamedDeBruijn> {
         EvalResult::new(term, machine.ex_budget, initial_budget, machine.logs)
     }
 
-    /// Evaluate a Program as PlutusV1
-    pub fn eval_version(self, version: &Language) -> EvalResult {
-        let mut machine = Machine::new(
-            version.clone(),
-            CostModel::default(),
-            ExBudget::default(),
-            200,
-        );
+    /// Evaluate a Program as a specific PlutusVersion
+    pub fn eval_version(self, initial_budget: ExBudget, version: &Language) -> EvalResult {
+        let mut machine = Machine::new(version.clone(), CostModel::default(), initial_budget, 200);
 
         let term = machine.run(self.term);
 
-        EvalResult::new(term, machine.ex_budget, ExBudget::default(), machine.logs)
+        EvalResult::new(term, machine.ex_budget, initial_budget, machine.logs)
     }
 
     pub fn eval_as(

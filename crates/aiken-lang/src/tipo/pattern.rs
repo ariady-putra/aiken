@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     ast::{CallArg, Pattern, Span, TypedPattern, UntypedPattern},
-    builtins::{int, list, tuple},
+    builtins::{int, list, pair, tuple},
 };
 use itertools::Itertools;
 use std::{
@@ -236,6 +236,46 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 }),
             },
 
+            Pattern::Pair { fst, snd, location } => match collapse_links(tipo.clone()).deref() {
+                Type::Pair {
+                    fst: t_fst,
+                    snd: t_snd,
+                    ..
+                } => {
+                    let fst = Box::new(self.unify(*fst, t_fst.clone(), None, false)?);
+                    let snd = Box::new(self.unify(*snd, t_snd.clone(), None, false)?);
+                    Ok(Pattern::Pair { fst, snd, location })
+                }
+
+                Type::Var { .. } => {
+                    let t_fst = self.environment.new_unbound_var();
+                    let t_snd = self.environment.new_unbound_var();
+
+                    self.environment.unify(
+                        pair(t_fst.clone(), t_snd.clone()),
+                        tipo,
+                        location,
+                        false,
+                    )?;
+
+                    let fst = Box::new(self.unify(*fst, t_fst, None, false)?);
+                    let snd = Box::new(self.unify(*snd, t_snd, None, false)?);
+
+                    Ok(Pattern::Pair { fst, snd, location })
+                }
+
+                _ => Err(Error::CouldNotUnify {
+                    given: pair(
+                        self.environment.new_unbound_var(),
+                        self.environment.new_unbound_var(),
+                    ),
+                    expected: tipo,
+                    situation: None,
+                    location,
+                    rigid_type_names: HashMap::new(),
+                }),
+            },
+
             Pattern::Tuple { elems, location } => match collapse_links(tipo.clone()).deref() {
                 Type::Tuple {
                     elems: type_elems, ..
@@ -304,7 +344,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 module,
                 name,
                 arguments: mut pattern_args,
-                with_spread,
+                spread_location,
                 is_record,
                 ..
             } => {
@@ -320,7 +360,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 match cons.field_map() {
                     // The fun has a field map so labelled arguments may be present and need to be reordered.
                     Some(field_map) => {
-                        if with_spread {
+                        if spread_location.is_some() {
                             // Using the spread operator when you have already provided variables for all of the
                             // record's fields throws an error
                             if pattern_args.len() == field_map.arity {
@@ -376,7 +416,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                                 name: name.clone(),
                                 args: pattern_args.clone(),
                                 module: module.clone(),
-                                with_spread,
+                                spread_location,
                             })
                         })
                         .unwrap_or(Ok(()))?,
@@ -405,7 +445,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
 
                 match instantiated_constructor_type.deref() {
                     Type::Fn { args, ret, .. } => {
-                        if with_spread && has_no_fields {
+                        if spread_location.is_some() && has_no_fields {
                             if pattern_args.len() == args.len() {
                                 return Err(Error::UnnecessarySpreadOperator {
                                     location: Span {
@@ -462,7 +502,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                                 name,
                                 arguments: pattern_args,
                                 constructor,
-                                with_spread,
+                                spread_location,
                                 tipo: instantiated_constructor_type,
                                 is_record,
                             })
@@ -493,7 +533,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                                 name,
                                 arguments: vec![],
                                 constructor,
-                                with_spread,
+                                spread_location,
                                 tipo: instantiated_constructor_type,
                                 is_record,
                             })

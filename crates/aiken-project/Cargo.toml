@@ -1,9 +1,9 @@
 [package]
 name = "aiken-project"
 description = "Aiken project utilities"
-version = "1.0.26-alpha"
+version = "1.0.28-alpha"
 edition = "2021"
-repository = "https://github.com/aiken-lang/aiken/crates/project"
+repository = "https://github.com/aiken-lang/aiken"
 homepage = "https://github.com/aiken-lang/aiken"
 license = "Apache-2.0"
 authors = [
@@ -41,13 +41,14 @@ toml = "0.7.2"
 walkdir.workspace = true
 zip = "0.6.4"
 
-aiken-lang = { path = "../aiken-lang", version = "1.0.26-alpha" }
-uplc = { path = '../uplc', version = "1.0.26-alpha" }
+aiken-lang = { path = "../aiken-lang", version = "1.0.28-alpha" }
+uplc = { path = '../uplc', version = "1.0.28-alpha" }
 num-bigint = "0.4.4"
 cryptoxide = "0.4.4"
 vec1 = "1.10.1"
 patricia_tree = "0.8.0"
 ciborium = "0.2.2"
+semver = { version = "1.0.23", features = ["serde"] }
 
 [dev-dependencies]
 blst = "0.3.11"

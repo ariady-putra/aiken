@@ -205,7 +205,6 @@ fn str_to_keyword(word: &str) -> Option<Token> {
         "todo" => Some(Token::Todo),
         "type" => Some(Token::Type),
         "trace" => Some(Token::Trace),
-        "emit" => Some(Token::Emit),
         "test" => Some(Token::Test),
         // TODO: remove this in a future release
         "error" => Some(Token::Fail),
@@ -225,6 +224,13 @@ pub type TypedTest = Function<Rc<Type>, TypedExpr, TypedArgVia>;
 pub type UntypedTest = Function<(), UntypedExpr, UntypedArgVia>;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum OnTestFailure {
+    FailImmediately,
+    SucceedImmediately,
+    SucceedEventually,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Function<T, Expr, Arg> {
     pub arguments: Vec<Arg>,
     pub body: Expr,
@@ -235,7 +241,7 @@ pub struct Function<T, Expr, Arg> {
     pub return_annotation: Option<Annotation>,
     pub return_type: T,
     pub end_position: usize,
-    pub can_error: bool,
+    pub on_test_failure: OnTestFailure,
 }
 
 impl TypedFunction {
@@ -280,7 +286,7 @@ impl From<UntypedTest> for UntypedFunction {
             return_annotation: f.return_annotation,
             return_type: f.return_type,
             body: f.body,
-            can_error: f.can_error,
+            on_test_failure: f.on_test_failure,
             end_position: f.end_position,
         }
     }
@@ -297,7 +303,7 @@ impl From<TypedTest> for TypedFunction {
             return_annotation: f.return_annotation,
             return_type: f.return_type,
             body: f.body,
-            can_error: f.can_error,
+            on_test_failure: f.on_test_failure,
             end_position: f.end_position,
         }
     }
@@ -970,6 +976,12 @@ pub enum Annotation {
         location: Span,
         elems: Vec<Self>,
     },
+
+    Pair {
+        location: Span,
+        fst: Box<Self>,
+        snd: Box<Self>,
+    },
 }
 
 impl Annotation {
@@ -979,7 +991,8 @@ impl Annotation {
             | Annotation::Tuple { location, .. }
             | Annotation::Var { location, .. }
             | Annotation::Hole { location, .. }
-            | Annotation::Constructor { location, .. } => *location,
+            | Annotation::Constructor { location, .. }
+            | Annotation::Pair { location, .. } => *location,
         }
     }
 
@@ -1081,6 +1094,18 @@ impl Annotation {
                 } => name == o_name,
                 _ => false,
             },
+            Annotation::Pair { fst, snd, .. } => {
+                if let Annotation::Pair {
+                    fst: o_fst,
+                    snd: o_snd,
+                    ..
+                } = other
+                {
+                    fst.is_logically_equal(o_fst) && snd.is_logically_equal(o_snd)
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -1101,6 +1126,9 @@ impl Annotation {
                 elems.iter().find_map(|arg| arg.find_node(byte_index))
             }
             Annotation::Var { .. } | Annotation::Hole { .. } => None,
+            Annotation::Pair { fst, snd, .. } => fst
+                .find_node(byte_index)
+                .or_else(|| snd.find_node(byte_index)),
         };
 
         located.or(Some(Located::Annotation(self)))
@@ -1221,8 +1249,14 @@ pub enum Pattern<Constructor, Type> {
         arguments: Vec<CallArg<Self>>,
         module: Option<String>,
         constructor: Constructor,
-        with_spread: bool,
+        spread_location: Option<Span>,
         tipo: Type,
+    },
+
+    Pair {
+        location: Span,
+        fst: Box<Self>,
+        snd: Box<Self>,
     },
 
     Tuple {
@@ -1240,7 +1274,17 @@ impl<A, B> Pattern<A, B> {
             | Pattern::List { location, .. }
             | Pattern::Discard { location, .. }
             | Pattern::Tuple { location, .. }
+            | Pattern::Pair { location, .. }
             | Pattern::Constructor { location, .. } => *location,
+        }
+    }
+
+    pub fn with_spread(&self) -> bool {
+        match self {
+            Pattern::Constructor {
+                spread_location, ..
+            } => spread_location.is_some(),
+            _ => false,
         }
     }
 
@@ -1266,7 +1310,7 @@ impl UntypedPattern {
             name: "True".to_string(),
             arguments: vec![],
             constructor: (),
-            with_spread: false,
+            spread_location: None,
             tipo: (),
             module: None,
             is_record: false,
@@ -1309,6 +1353,19 @@ impl TypedPattern {
                 _ => None,
             },
 
+            Pattern::Pair { fst, snd, .. } => match &**value {
+                Type::Pair {
+                    fst: fst_v,
+                    snd: snd_v,
+                    ..
+                } => [fst, snd]
+                    .into_iter()
+                    .zip([fst_v, snd_v].iter())
+                    .find_map(|(e, t)| e.find_node(byte_index, t))
+                    .or(Some(Located::Pattern(self, value.clone()))),
+                _ => None,
+            },
+
             Pattern::Constructor {
                 arguments, tipo, ..
             } => match &**tipo {
@@ -1322,6 +1379,7 @@ impl TypedPattern {
         }
     }
 
+    // TODO: This function definition is weird, see where this is used and how.
     pub fn tipo(&self, value: &TypedExpr) -> Option<Rc<Type>> {
         match self {
             Pattern::Int { .. } => Some(builtins::int()),
@@ -1329,7 +1387,7 @@ impl TypedPattern {
             Pattern::Var { .. } | Pattern::Assign { .. } | Pattern::Discard { .. } => {
                 Some(value.tipo())
             }
-            Pattern::List { .. } | Pattern::Tuple { .. } => None,
+            Pattern::List { .. } | Pattern::Tuple { .. } | Pattern::Pair { .. } => None,
         }
     }
 }
@@ -1814,7 +1872,6 @@ pub enum TraceKind {
     Trace,
     Todo,
     Error,
-    Emit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2011,7 +2068,7 @@ pub enum Error {
     #[diagnostic(code("illegal::module_name"))]
     #[diagnostic(help(r#"You cannot use keywords as part of a module path name. As a quick reminder, here's a list of all the keywords (and thus, of invalid module path names):
 
-    as, expect, check, const, else, fn, if, is, let, opaque, pub, test, todo, trace, emit, type, use, when"#))]
+    as, expect, check, const, else, fn, if, is, let, opaque, pub, test, todo, trace, type, use, when"#))]
     KeywordInModuleName { name: String, keyword: String },
 
     #[error("I realized you used '{}' as a module name, which is reserved (and not available).\n",

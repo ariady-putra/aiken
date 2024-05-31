@@ -1,11 +1,10 @@
-use std::{collections::BTreeMap, iter, ops::Deref};
-
-use itertools::Itertools;
-
 use crate::{
-    ast, builtins,
+    ast,
+    builtins::{self},
     tipo::{self, environment::Environment, error::Error},
 };
+use itertools::Itertools;
+use std::{collections::BTreeMap, iter, ops::Deref};
 
 const NIL_NAME: &str = "[]";
 const CONS_NAME: &str = "::";
@@ -87,8 +86,8 @@ impl PatternStack {
                 Some(self.chain_tail_into_iter(vec![Pattern::Wildcard; arity].into_iter()))
             }
             Pattern::Literal(_) => unreachable!(
-            "constructors and literals should never align in pattern match exhaustiveness checks."
-        ),
+                "constructors and literals should never align in pattern match exhaustiveness checks."
+            ),
         }
     }
 
@@ -559,7 +558,7 @@ pub(super) fn simplify(
             arguments,
             location,
             tipo,
-            with_spread,
+            spread_location,
             constructor: super::PatternConstructor::Record { name, .. },
             ..
         } => {
@@ -590,7 +589,7 @@ pub(super) fn simplify(
                 args.push(simplify(environment, &argument.value)?);
             }
 
-            if *with_spread {
+            if spread_location.is_some() {
                 for _ in 0..(arity - arguments.len()) {
                     args.push(Pattern::Wildcard)
                 }
@@ -598,6 +597,13 @@ pub(super) fn simplify(
 
             Ok(Pattern::Constructor(name.to_string(), alts, args))
         }
+        ast::Pattern::Pair { fst, snd, location } => simplify(
+            environment,
+            &ast::Pattern::Tuple {
+                elems: vec![*fst.clone(), *snd.clone()],
+                location: *location,
+            },
+        ),
         ast::Pattern::Tuple { elems, .. } => {
             let mut args = vec![];
 

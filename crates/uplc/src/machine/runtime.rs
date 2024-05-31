@@ -4,7 +4,7 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use once_cell::sync::Lazy;
-use pallas::ledger::primitives::babbage::{Language, PlutusData};
+use pallas_primitives::conway::{Language, PlutusData};
 
 use crate::{
     ast::{Constant, Data, Type},
@@ -52,6 +52,7 @@ impl From<&Language> for BuiltinSemantics {
         match language {
             Language::PlutusV1 => BuiltinSemantics::V1,
             Language::PlutusV2 => BuiltinSemantics::V1,
+            Language::PlutusV3 => BuiltinSemantics::V2,
         }
     }
 }

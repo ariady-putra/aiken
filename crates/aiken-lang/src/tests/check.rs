@@ -186,6 +186,24 @@ fn illegal_inhabitants_nested() {
 }
 
 #[test]
+fn illegal_function_comparison() {
+    let source_code = r#"
+    fn not(x: Bool) -> Bool {
+      todo
+    }
+
+    fn foo() -> Bool {
+      not == not
+    }
+    "#;
+
+    assert!(matches!(
+        dbg!(check_validator(parse(source_code))),
+        Err((_, Error::IllegalComparison { .. }))
+    ))
+}
+
+#[test]
 fn illegal_inhabitants_returned() {
     let source_code = r#"
         type Fuzzer<a> = fn(PRNG) -> (a, PRNG)
@@ -203,6 +221,73 @@ fn illegal_inhabitants_returned() {
 
     assert!(matches!(
         check_validator(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
+    ))
+}
+
+#[test]
+fn illegal_generic_instantiation() {
+    let source_code = r#"
+        type Rec<t> {
+             get_t: t,
+        }
+
+
+        fn use_dict(dict: Rec<fn(Bool) -> Bool>, b: Bool) -> Bool {
+           let f = dict.get_t
+           f(b)
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
+    ))
+}
+
+#[test]
+fn not_illegal_top_level_unserialisable() {
+    let source_code = r#"
+        fn foo() -> MillerLoopResult {
+          todo
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn illegal_unserialisable_in_generic_fn() {
+    let source_code = r#"
+        type Foo<a> {
+          foo: a
+        }
+
+        fn main() -> Foo<fn(Int) -> Bool> {
+          todo
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::IllegalTypeInData { .. }))
+    ))
+}
+
+#[test]
+fn illegal_unserialisable_in_generic_miller_loop() {
+    let source_code = r#"
+        type Foo<a> {
+          foo: a
+        }
+
+        fn main() -> Foo<MillerLoopResult> {
+          todo
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check(parse(source_code))),
         Err((_, Error::IllegalTypeInData { .. }))
     ))
 }
@@ -236,6 +321,29 @@ fn mark_constructors_as_used_via_field_access() {
     let (warnings, _) = check_validator(parse(source_code)).unwrap();
 
     assert_eq!(warnings.len(), 1)
+}
+
+#[test]
+fn expect_multi_patterns() {
+    let source_code = r#"
+      fn fold(list: List<a>, initial: b, apply: fn(a, b) -> b) {
+        when list is {
+          [] -> initial
+
+          [x, ..xs] -> fold(xs, apply(x, initial), apply)
+        }
+      }
+
+      pub fn foo() {
+        expect Some(x), acc  <- fold([Some(1), None], 0)
+
+        x + acc
+      }
+    "#;
+
+    let (warnings, _) = check(parse(source_code)).unwrap();
+
+    assert_eq!(warnings.len(), 0)
 }
 
 #[test]
@@ -2294,4 +2402,140 @@ fn tuple_access_on_call() {
     "#;
 
     assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn partial_eq_call_args() {
+    let source_code = r#"
+        fn foo(a: Int, b: Int, c: Bool) -> Int {
+            todo
+        }
+
+        fn main() -> Int {
+            foo(14, 42)
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check(parse(source_code))),
+        Err((_, Error::IncorrectFieldsArity { .. }))
+    ));
+}
+
+#[test]
+fn partial_eq_callback_args() {
+    let source_code = r#"
+        fn foo(cb: fn(Int, Int, Bool) -> Int) -> Int {
+            todo
+        }
+
+        fn main() -> Int {
+            foo(fn(a, b) { a + b })
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check(parse(source_code))),
+        Err((_, Error::CouldNotUnify { .. }))
+    ));
+}
+
+#[test]
+fn partial_eq_callback_return() {
+    let source_code = r#"
+        fn foo(cb: fn(Int, Int) -> (Int, Int, Bool)) -> Int {
+            todo
+        }
+
+        fn main() -> Int {
+            foo(fn(a, b) { (a, b) })
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check(parse(source_code))),
+        Err((_, Error::CouldNotUnify { .. }))
+    ));
+}
+
+#[test]
+fn pair_access_on_call() {
+    let source_code = r#"
+        use aiken/builtin
+
+        pub fn list_at(xs: List<a>, index: Int) -> a {
+          if index == 0 {
+            builtin.head_list(xs)
+          } else {
+            list_at(builtin.tail_list(xs), index - 1)
+          }
+        }
+
+        fn foo() {
+          [list_at([Pair(1, 2)], 0).2nd, ..[1, 2]]
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn pair_index_out_of_bound() {
+    let source_code = r#"
+        pub fn foo() {
+            Pair(1, 2).3rd
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check_validator(parse(source_code))),
+        Err((_, Error::PairIndexOutOfBound { .. }))
+    ))
+}
+
+#[test]
+fn not_indexable() {
+    let source_code = r#"
+        pub fn foo() {
+            "foo".1st
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check_validator(parse(source_code))),
+        Err((_, Error::NotIndexable { .. }))
+    ))
+}
+
+#[test]
+fn out_of_scope_access() {
+    let source_code = r#"
+        pub fn a(x: Int) {
+          b(x)
+        }
+
+        fn b(y: Int) {
+          x + y
+        }
+    "#;
+
+    assert!(matches!(
+        dbg!(check_validator(parse(source_code))),
+        Err((_, Error::UnknownVariable { .. }))
+    ))
+}
+
+#[test]
+fn mutually_recursive_1() {
+    let source_code = r#"
+        pub fn foo(x) {
+            bar(x)
+        }
+
+        pub fn bar(y) {
+            foo(y)
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
 }

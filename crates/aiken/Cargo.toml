@@ -1,24 +1,30 @@
 [package]
 name = "aiken"
 description = "Cardano smart contract language and toolchain"
-version = "1.0.26-alpha"
+version = "1.0.28-alpha"
 edition = "2021"
 repository = "https://github.com/aiken-lang/aiken"
 homepage = "https://github.com/aiken-lang/aiken"
 license = "Apache-2.0"
 authors = [
-  "Lucas Rosa <x@rvcas.dev>",
-  "Kasey White <kwhitemsg@gmail.com>",
-  "KtorZ <matthias.benkort@gmail.com>",
+    "Lucas Rosa <x@rvcas.dev>",
+    "Kasey White <kwhitemsg@gmail.com>",
+    "KtorZ <matthias.benkort@gmail.com>",
 ]
-rust-version = "1.66.1"
+rust-version = "1.70.0"
+
+[package.metadata.wix]
+upgrade-guid = "288B160D-418A-4558-91B9-7C38CFD789C7"
+path-guid = "4EB8FCD6-261B-4F6C-B7DB-CFA67B4E6960"
+license = false
+eula = false
 
 [dependencies]
 clap = { version = "4.1.8", features = [
-  "derive",
-  "wrap_help",
-  "unicode",
-  "string",
+    "derive",
+    "wrap_help",
+    "unicode",
+    "string",
 ] }
 hex = "0.4.3"
 ignore = "0.4.20"
@@ -30,12 +36,15 @@ regex = "1.7.1"
 serde_json = "1.0.94"
 thiserror = "1.0.39"
 
-aiken-lang = { path = "../aiken-lang", version = "1.0.26-alpha" }
-aiken-lsp = { path = "../aiken-lsp", version = "1.0.26-alpha" }
-aiken-project = { path = '../aiken-project', version = "1.0.26-alpha" }
-uplc = { path = '../uplc', version = "1.0.26-alpha" }
+aiken-lang = { path = "../aiken-lang", version = "1.0.28-alpha" }
+aiken-lsp = { path = "../aiken-lsp", version = "1.0.28-alpha" }
+aiken-project = { path = '../aiken-project', version = "1.0.28-alpha" }
+uplc = { path = '../uplc', version = "1.0.28-alpha" }
 clap_complete = "4.3.2"
 inquire = "0.6.2"
 num-bigint = "0.4.3"
 ordinal = "0.3.2"
 rand = "0.8.5"
+
+[target.'cfg(not(windows))'.dependencies]
+xdg = "2.5.2"

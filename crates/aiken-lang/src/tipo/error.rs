@@ -1,6 +1,6 @@
 use super::Type;
 use crate::{
-    ast::{Annotation, BinOp, CallArg, LogicalOpChainKind, Span, UntypedPattern},
+    ast::{Annotation, BinOp, CallArg, LogicalOpChainKind, Span, UntypedFunction, UntypedPattern},
     error::ExtraData,
     expr::{self, UntypedExpr},
     format::Formatter,
@@ -292,9 +292,22 @@ You can use '{discard}' and numbers to distinguish between similar names.
         Fuzzer = "Fuzzer".if_supports_color(Stdout, |s| s.cyan()),
     ))]
     IllegalTypeInData {
-        #[label]
+        #[label("non-serialisable inhabitants")]
         location: Span,
         tipo: Rc<Type>,
+    },
+
+    #[error("I noticed an inadequate use of '=='.\n")]
+    #[diagnostic(code("illegal::comparison"))]
+    #[diagnostic(help(
+        r#"I can compare any value that is serializable to {Data}. This excludes values that are functions, {Fuzzer} or {MillerLoopResult} for example."#,
+        Data = "Data".if_supports_color(Stdout, |s| s.cyan()),
+        Fuzzer = "Fuzzer".if_supports_color(Stdout, |s| s.cyan()),
+        MillerLoopResult = "MillerLoopResult".if_supports_color(Stdout, |s| s.cyan()),
+    ))]
+    IllegalComparison {
+        #[label("non-serialisable operands")]
+        location: Span,
     },
 
     #[error("I found a discarded expression not bound to a variable.\n")]
@@ -508,18 +521,16 @@ If you really meant to return that last expression, try to replace it with the f
         name: String,
     },
 
-    #[error(
-        "I tripped over an attempt to access tuple elements on something else than a tuple.\n"
-    )]
+    #[error("I tripped over an attempt to access elements on something that isn't indexable.\n")]
     #[diagnostic(url("https://aiken-lang.org/language-tour/primitive-types#tuples"))]
-    #[diagnostic(code("illegal::tuple_index"))]
+    #[diagnostic(code("illegal::indexable"))]
     #[diagnostic(help(
-        r#"Because you used a tuple-index on an element, I assumed it had to be a tuple but instead I found something of type:
+        r#"Because you used an ordinal index on an element, I assumed it had to be a tuple or a pair but instead I found something of type:
 
 ╰─▶ {type_info}"#,
         type_info = tipo.to_pretty(0).if_supports_color(Stdout, |s| s.red())
     ))]
-    NotATuple {
+    NotIndexable {
         #[label]
         location: Span,
         tipo: Rc<Type>,
@@ -675,10 +686,23 @@ You can help me by providing a type-annotation for 'x', as such:
     #[diagnostic(url("https://aiken-lang.org/language-tour/primitive-types#tuples"))]
     #[diagnostic(code("invalid::tuple_index"))]
     TupleIndexOutOfBound {
-        #[label]
+        #[label("out of bounds")]
         location: Span,
         index: usize,
         size: usize,
+    },
+
+    #[error(
+        "I discovered an attempt to access the {} element of a {}.\n",
+        Ordinal(*index + 1).to_string().if_supports_color(Stdout, |s| s.purple()),
+        "Pair".if_supports_color(Stdout, |s| s.bright_blue()).if_supports_color(Stdout, |s| s.bold()),
+    )]
+    #[diagnostic(url("https://aiken-lang.org/language-tour/primitive-types#pairs"))]
+    #[diagnostic(code("invalid::pair_index"))]
+    PairIndexOutOfBound {
+        #[label("out of bounds")]
+        location: Span,
+        index: usize,
     },
 
     #[error(
@@ -708,7 +732,7 @@ Perhaps, try the following:
         , constructor = name
             .if_supports_color(Stdout, |s| s.bright_blue())
             .if_supports_color(Stdout, |s| s.bold())
-        , suggestion = suggest_constructor_pattern(name, args, module, *with_spread)
+        , suggestion = suggest_constructor_pattern(name, args, module, *spread_location)
     ))]
     UnexpectedLabeledArgInPattern {
         #[label]
@@ -717,7 +741,7 @@ Perhaps, try the following:
         name: String,
         args: Vec<CallArg<UntypedPattern>>,
         module: Option<String>,
-        with_spread: bool,
+        spread_location: Option<Span>,
     },
 
     #[error("I discovered a regular let assignment with multiple patterns.\n")]
@@ -1004,6 +1028,12 @@ The best thing to do from here is to remove it."#))]
         #[label("unbound generic at boundary")]
         location: Span,
     },
+
+    #[error("Cannot infer caller without inferring callee first")]
+    MustInferFirst {
+        function: UntypedFunction,
+        location: Span,
+    },
 }
 
 impl ExtraData for Error {
@@ -1022,6 +1052,7 @@ impl ExtraData for Error {
             | Error::ExtraVarInAlternativePattern { .. }
             | Error::FunctionTypeInData { .. }
             | Error::IllegalTypeInData { .. }
+            | Error::IllegalComparison { .. }
             | Error::ImplicitlyDiscardedExpression { .. }
             | Error::IncorrectFieldsArity { .. }
             | Error::IncorrectFunctionCallArity { .. }
@@ -1035,7 +1066,7 @@ impl ExtraData for Error {
             | Error::MissingVarInAlternativePattern { .. }
             | Error::MultiValidatorEqualArgs { .. }
             | Error::NonLocalClauseGuardVariable { .. }
-            | Error::NotATuple { .. }
+            | Error::NotIndexable { .. }
             | Error::NotExhaustivePatternMatch { .. }
             | Error::NotFn { .. }
             | Error::PositionalArgumentAfterLabeled { .. }
@@ -1045,6 +1076,7 @@ impl ExtraData for Error {
             | Error::RecursiveType { .. }
             | Error::RedundantMatchClause { .. }
             | Error::TupleIndexOutOfBound { .. }
+            | Error::PairIndexOutOfBound { .. }
             | Error::UnexpectedLabeledArg { .. }
             | Error::UnexpectedLabeledArgInPattern { .. }
             | Error::UnknownLabels { .. }
@@ -1059,7 +1091,8 @@ impl ExtraData for Error {
             | Error::GenericLeftAtBoundary { .. }
             | Error::UnexpectedMultiPatternAssignment { .. }
             | Error::ExpectOnOpaqueType { .. }
-            | Error::ValidatorMustReturnBool { .. } => None,
+            | Error::ValidatorMustReturnBool { .. }
+            | Error::MustInferFirst { .. } => None,
 
             Error::UnknownType { name, .. }
             | Error::UnknownTypeConstructor { name, .. }
@@ -1117,7 +1150,7 @@ impl Error {
                 rigid_type_names: ref mut annotated_names,
                 ..
             } => {
-                *annotated_names = new_names.clone();
+                annotated_names.clone_from(new_names);
                 self
             }
             _ => self,
@@ -1177,7 +1210,7 @@ fn suggest_pattern(
         Some(format!(
             "Try instead: {}",
             Formatter::new()
-                .pattern_constructor(name, given, module, true, is_record)
+                .pattern_constructor(name, given, module, Some(Span::empty()), is_record)
                 .to_pretty_string(70),
         ))
     } else {
@@ -1206,7 +1239,7 @@ fn suggest_constructor_pattern(
     name: &str,
     args: &[CallArg<UntypedPattern>],
     module: &Option<String>,
-    with_spread: bool,
+    spread_location: Option<Span>,
 ) -> String {
     let fixed_args = args
         .iter()
@@ -1218,7 +1251,7 @@ fn suggest_constructor_pattern(
         .collect::<Vec<_>>();
 
     Formatter::new()
-        .pattern_constructor(name, &fixed_args, module, with_spread, false)
+        .pattern_constructor(name, &fixed_args, module, spread_location, false)
         .to_pretty_string(70)
 }
 
@@ -1442,31 +1475,29 @@ fn suggest_import_constructor() -> String {
 
 #[derive(Debug, PartialEq, Clone, thiserror::Error, Diagnostic)]
 pub enum Warning {
-    #[error("I found a record update using all fields; thus redundant.\n")]
+    #[error("I found a record update using all fields; thus redundant.")]
     #[diagnostic(url("https://aiken-lang.org/language-tour/custom-types#record-updates"))]
     #[diagnostic(code("record_update::all_fields"))]
     AllFieldsRecordUpdate {
-        #[label]
+        #[label("redundant record update")]
         location: Span,
     },
 
-    #[error(
-        "I realized the following expression returned a result that is implicitly discarded.\n"
-    )]
+    #[error("I realized the following expression returned a result that is implicitly discarded.")]
     #[diagnostic(help(
         "You can use the '_' symbol should you want to explicitly discard a result."
     ))]
     #[diagnostic(code("implicit_discard"))]
     ImplicitlyDiscardedResult {
-        #[label]
+        #[label("implicitly discarded result")]
         location: Span,
     },
 
-    #[error("I found a record update with no fields; effectively updating nothing.\n")]
+    #[error("I found a record update with no fields; effectively updating nothing.")]
     #[diagnostic(url("https://aiken-lang.org/language-tour/custom-types#record-updates"))]
     #[diagnostic(code("record_update::no_fields"))]
     NoFieldsRecordUpdate {
-        #[label]
+        #[label("useless record update")]
         location: Span,
     },
 
@@ -1486,17 +1517,20 @@ pub enum Warning {
     },
 
     #[error(
-        "I found an {} trying to match a type with one constructor",
-        "expect".if_supports_color(Stderr, |s| s.purple())
+        "I found an {} {}",
+        "expect".if_supports_color(Stderr, |s| s.purple()),
+        "trying to match a type with one constructor".if_supports_color(Stderr, |s| s.yellow())
     )]
     #[diagnostic(
         code("single_constructor_expect"),
         help(
             "If your type has one constructor, unless you are casting {} {}, you can\nprefer using a {} binding like so...\n\n{}",
             "from".if_supports_color(Stderr, |s| s.bold()),
-            "Data".if_supports_color(Stderr, |s| s.bright_blue()),
+            "Data"
+                .if_supports_color(Stderr, |s| s.bold())
+                .if_supports_color(Stderr, |s| s.bright_blue()),
             "let".if_supports_color(Stderr, |s| s.purple()),
-            format_suggestion(sample)
+            format_suggestion(sample),
         )
     )]
     SingleConstructorExpect {
@@ -1509,7 +1543,7 @@ pub enum Warning {
         sample: UntypedExpr,
     },
 
-    #[error("I found a todo left in the code.\n")]
+    #[error("I found a todo left in the code.")]
     #[diagnostic(help("You probably want to replace that with actual code... eventually."))]
     #[diagnostic(code("todo"))]
     Todo {
@@ -1518,7 +1552,7 @@ pub enum Warning {
         tipo: Rc<Type>,
     },
 
-    #[error("I found a type hole in an annotation.\n")]
+    #[error("I found a type hole in an annotation.")]
     #[diagnostic(code("unexpected::type_hole"))]
     UnexpectedTypeHole {
         #[label("{}", tipo.to_pretty(0))]
@@ -1527,93 +1561,95 @@ pub enum Warning {
     },
 
     #[error(
-        "I discovered an unused constructor: '{}'.\n",
-        name.if_supports_color(Stderr, |s| s.purple())
+        "I discovered an unused constructor: {}",
+        name.if_supports_color(Stderr, |s| s.default_color())
     )]
     #[diagnostic(help(
         "No big deal, but you might want to remove it to get rid of that warning."
     ))]
     #[diagnostic(code("unused::constructor"))]
     UnusedConstructor {
-        #[label]
+        #[label("unused constructor")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I discovered an unused imported module: '{}'.\n",
-        name.if_supports_color(Stderr, |s| s.purple())
+        "I discovered an unused imported module: {}",
+        name.if_supports_color(Stderr, |s| s.default_color()),
     )]
     #[diagnostic(help(
         "No big deal, but you might want to remove it to get rid of that warning."
     ))]
     #[diagnostic(code("unused::import::module"))]
     UnusedImportedModule {
-        #[label]
+        #[label("unused module")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I discovered an unused imported value: '{}'.\n",
-        name.if_supports_color(Stderr, |s| s.purple()),
+        "I discovered an unused imported value: {}",
+        name.if_supports_color(Stderr, |s| s.default_color()),
     )]
     #[diagnostic(help(
         "No big deal, but you might want to remove it to get rid of that warning."
     ))]
     #[diagnostic(code("unused:import::value"))]
     UnusedImportedValueOrType {
-        #[label]
+        #[label("unused import")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I found an unused private function: '{}'.\n",
-        name.if_supports_color(Stderr, |s| s.purple()),
+        "I found an unused private function: {}",
+        name.if_supports_color(Stderr, |s| s.default_color()),
     )]
     #[diagnostic(help(
-        "Perhaps your forgot to make it public using the '{keyword_pub}' keyword?\n\
+        "Perhaps your forgot to make it public using the {keyword_pub} keyword?\n\
          Otherwise, you might want to get rid of it altogether.",
          keyword_pub = "pub".if_supports_color(Stderr, |s| s.bright_blue())
     ))]
     #[diagnostic(code("unused::function"))]
     UnusedPrivateFunction {
-        #[label]
+        #[label("unused (private) function")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I found an unused (private) module constant: '{}'.\n",
-        name.if_supports_color(Stderr, |s| s.purple())
+        "I found an unused (private) module constant: {}",
+        name.if_supports_color(Stderr, |s| s.default_color()),
     )]
     #[diagnostic(help(
-        "Perhaps your forgot to make it public using the '{keyword_pub}' keyword?\n\
+        "Perhaps your forgot to make it public using the {keyword_pub} keyword?\n\
          Otherwise, you might want to get rid of it altogether.",
          keyword_pub = "pub".if_supports_color(Stderr, |s| s.bright_blue())
     ))]
     #[diagnostic(code("unused::constant"))]
     UnusedPrivateModuleConstant {
-        #[label]
+        #[label("unused (private) constant")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I discovered an unused type: '{}'.\n",
-        name.if_supports_color(Stderr, |s| s.purple())
+        "I discovered an unused type: {}",
+        name
+            .if_supports_color(Stderr, |s| s.bright_blue())
+            .if_supports_color(Stderr, |s| s.bold())
     )]
     #[diagnostic(code("unused::type"))]
     UnusedType {
-        #[label]
+        #[label("unused (private) type")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I came across an unused variable: {}.\n",
-        name.if_supports_color(Stderr, |s| s.purple())
+        "I came across an unused variable: {}",
+        name.if_supports_color(Stderr, |s| s.default_color()),
     )]
     #[diagnostic(help("{}", formatdoc! {
         r#"No big deal, but you might want to remove it or use a discard {name} to get rid of that warning.
@@ -1630,14 +1666,14 @@ pub enum Warning {
     }))]
     #[diagnostic(code("unused::variable"))]
     UnusedVariable {
-        #[label("unused")]
+        #[label("unused identifier")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I came across a discarded variable in a let assignment: {}.\n",
-        name.if_supports_color(Stderr, |s| s.purple())
+        "I came across a discarded variable in a let assignment: {}",
+        name.if_supports_color(Stderr, |s| s.default_color())
     )]
     #[diagnostic(help("{}", formatdoc! {
         r#"If you do want to enforce some side-effects, use {keyword_expect} with {name} instead of {keyword_let}.
@@ -1652,14 +1688,15 @@ pub enum Warning {
     }))]
     #[diagnostic(code("unused::discarded_let_assignment"))]
     DiscardedLetAssignment {
-        #[label("discarded")]
+        #[label("discarded result")]
         location: Span,
         name: String,
     },
 
     #[error(
-        "I came across a validator in a {} module which means\nI'm going to ignore it.\n",
-        "lib/".if_supports_color(Stderr, |s| s.purple())
+        "I came across a validator in a {} {}",
+        "lib/".if_supports_color(Stderr, |s| s.purple()),
+        "module which means\nI'm going to ignore it.\n".if_supports_color(Stderr, |s| s.yellow()),
     )]
     #[diagnostic(help(
         "No big deal, but you might want to move it to a {} module\nor remove it to get rid of that warning.",
@@ -1667,15 +1704,16 @@ pub enum Warning {
     ))]
     #[diagnostic(code("unused::validator"))]
     ValidatorInLibraryModule {
-        #[label("unused")]
+        #[label("unused validator")]
         location: Span,
     },
 
     #[error(
-        "I noticed a suspicious {type_ByteArray} UTF-8 literal which resembles a hash digest.",
+        "I noticed a suspicious {type_ByteArray} {tail}",
         type_ByteArray = "ByteArray"
             .if_supports_color(Stderr, |s| s.bright_blue())
-            .if_supports_color(Stderr, |s| s.bold())
+            .if_supports_color(Stderr, |s| s.bold()),
+        tail = "UTF-8 literal which resembles a hash digest.".if_supports_color(Stderr, |s| s.yellow()),
     )]
     #[diagnostic(help("{}", formatdoc! {
         r#"When you specify a {type_ByteArray} literal using plain double-quotes, it's interpreted as an array of UTF-8 bytes. For example, the literal {literal_foo} is interpreted as the byte sequence {foo_bytes}.
@@ -1760,11 +1798,9 @@ fn format_suggestion(sample: &UntypedExpr) -> String {
         .enumerate()
         .map(|(ix, line)| {
             if ix == 0 {
-                format!("╰─▶ {}", line.if_supports_color(Stdout, |s| s.yellow()))
+                format!("╰─▶ {line}")
             } else {
                 format!("    {line}")
-                    .if_supports_color(Stdout, |s| s.yellow())
-                    .to_string()
             }
         })
         .collect::<Vec<_>>()

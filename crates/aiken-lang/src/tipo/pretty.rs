@@ -54,7 +54,7 @@ impl Printer {
         }) = typ.alias().as_deref()
         {
             if let Some(resolved_parameters) = resolve_alias(parameters, annotation, typ) {
-                return self.type_alias_doc(alias.to_string(), resolved_parameters);
+                return self.type_alias_doc(typ, alias.to_string(), resolved_parameters);
             }
         }
 
@@ -86,17 +86,33 @@ impl Printer {
             Type::Var { tipo: typ, .. } => self.type_var_doc(&typ.borrow()),
 
             Type::Tuple { elems, .. } => self.args_to_aiken_doc(elems).surround("(", ")"),
+            Type::Pair { fst, snd, .. } => self
+                .args_to_aiken_doc(&[fst.clone(), snd.clone()])
+                .surround("Pair<", ">"),
         }
     }
 
-    fn type_alias_doc<'a>(&mut self, alias: String, parameters: Vec<Rc<Type>>) -> Document<'a> {
+    fn type_alias_doc<'a>(
+        &mut self,
+        typ: &Type,
+        alias: String,
+        parameters: Vec<Rc<Type>>,
+    ) -> Document<'a> {
         let doc = Document::String(alias);
 
         if !parameters.is_empty() {
             doc.append(
                 break_("", "")
                     .append(concat(Itertools::intersperse(
-                        parameters.iter().map(|t| self.print(t)),
+                        parameters.iter().map(|t| {
+                            // Avoid infinite recursion for recursive types instantiated to
+                            // themselves. For example: type Identity<t> = t
+                            if t.as_ref() == typ {
+                                self.print(typ.clone().set_alias(None).as_ref())
+                            } else {
+                                self.print(t)
+                            }
+                        }),
                         break_(",", ", "),
                     )))
                     .nest(INDENT)
@@ -120,7 +136,8 @@ impl Printer {
     fn type_var_doc<'a>(&mut self, typ: &TypeVar) -> Document<'a> {
         match typ {
             TypeVar::Link { tipo: ref typ, .. } => self.print(typ),
-            TypeVar::Unbound { id, .. } | TypeVar::Generic { id, .. } => self.generic_type_var(*id),
+            TypeVar::Generic { id, .. } => self.generic_type_var(*id),
+            TypeVar::Unbound { .. } => "?".to_doc(),
         }
     }
 
@@ -241,6 +258,21 @@ fn resolve_alias(
             (Annotation::Tuple { elems, .. }, Type::Tuple { elems: t_elems, .. }) => {
                 let mut result = None;
                 for (ann, t) in elems.iter().zip(t_elems) {
+                    result = result.or_else(|| resolve_one(parameter, ann, t.clone()));
+                }
+                result
+            }
+
+            (
+                Annotation::Pair { fst, snd, .. },
+                Type::Pair {
+                    fst: t_fst,
+                    snd: t_snd,
+                    ..
+                },
+            ) => {
+                let mut result = None;
+                for (ann, t) in [fst, snd].into_iter().zip([t_fst, t_snd]) {
                     result = result.or_else(|| resolve_one(parameter, ann, t.clone()));
                 }
                 result
@@ -455,7 +487,7 @@ mod tests {
                 tipo: Rc::new(RefCell::new(TypeVar::Unbound { id: 2231 })),
                 alias: None,
             },
-            "a",
+            "?",
         );
         assert_string!(
             function(
@@ -468,7 +500,7 @@ mod tests {
                     alias: None,
                 }),
             ),
-            "fn(a) -> b",
+            "fn(?) -> ?",
         );
         assert_string!(
             function(
@@ -626,6 +658,35 @@ mod tests {
                 })),
             },
             "Fuzzer<a>",
+        );
+        assert_string!(
+            Rc::new(Type::Fn {
+                args: vec![Rc::new(Type::App {
+                    public: true,
+                    contains_opaque: false,
+                    module: "".to_string(),
+                    name: "Bool".to_string(),
+                    args: vec![],
+                    alias: None,
+                })],
+                ret: Rc::new(Type::App {
+                    public: true,
+                    contains_opaque: false,
+                    module: "".to_string(),
+                    name: "Bool".to_string(),
+                    args: vec![],
+                    alias: None,
+                }),
+                alias: Some(Rc::new(TypeAliasAnnotation {
+                    alias: "Identity".to_string(),
+                    parameters: vec!["t".to_string()],
+                    annotation: Annotation::Var {
+                        location: Span::empty(),
+                        name: "t".to_string(),
+                    },
+                })),
+            }),
+            "Identity<fn(Bool) -> Bool>",
         );
     }
 

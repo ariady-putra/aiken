@@ -1,18 +1,66 @@
 # Changelog
 
-## v1.0.27-alpha - unreleased
+## v1.0.29-alpha - UNRELEASED
 
 ### Added
 
+- **aiken-lang**: new LSP quickfix for 'use let' warning. @KtorZ
+
+### Changed
+
+- **aiken-lang**: the keyword `fail` on property-based test semantic has changed and now consider a test to succeed only if **every** execution of the test failed (instead of just one). The previous behavior can be recovered by adding the keyword `once` after `fail`. @KtorZ
+
+### Fixed
+
+- **aiken-lang**: fixed the number of 'after x tests' number reported on property test failure, which was off by one. @KtorZ
+- **aiken-lang**: fixed parsing of single hex digits. @KtorZ
+
+## v1.0.28-alpha - 2024-05-23
+
+### Added
+
+- **aiken**: install shell completions automatically. @freexploit
+- **aiken**: added export command that exports regular function definitons. @rvcas
+- **aiken-project**: compiler version field to `aiken.toml` @rvcas
+- **aiken-project**: plutus version field to `aiken.toml` @rvcas
 - **aiken-lsp**: hover and goto definition support on list tail. @rvcas
 - **aiken-lsp**: hover on prop test via expression. @rvcas
-- **aiken**: added export command that exporting of regular function definitons. @rvcas
-- **aiken-lang**: a new way to emit logs that don't get erased. @micahkendall
+- **aiken-lang**: new builtin types in the prelude `Pair` and `Pairs`. @KtorZ @Microproofs
+- **aiken-lang**: Codegen now generates uplc version 1.1.0 scripts when running build with plutus v3.
 
 ### Fixed
 
 - **aiken-lang**: formatter should not erase `pub` on validators. @rvcas
 - **aiken-lang**: error on using tuple index when a tuple is returned by a generic function. @rvcas
+- **aiken-lang**: backpassing with expect gives a warning on pattern matches. @rvcas
+- **aiken-lang**: fix a regression in the Type-checker introduced in v1.0.25-alpha regarding types comparison. See #917. @KtorZ
+- **aiken-lang**: fix incongruous generics after type-checking which caused [] to be treated as a list in cases where it needed to be an empty map primitive. See #922. @KtorZ
+- **aiken-lang**: fix for generic constrs being used as functions causing type mismatch errors. @Microproofs
+- **aiken-lang**: fix for error occuring when a field holds Data that is not a constr type when compiler traces are on. @Microproofs
+- **aiken-lang**: fix for curry optimization involving 2 constants #945. @MicroProofs
+- **aiken-lang**: fix compiler wrongly requiring MillerLoopResult to be 'serialisable' when manipulated as a top-level value. See #921. @KtorZ
+- **aiken-lang**: fix type-checker oversight regarding serialisation of generics. See #939. @KtorZ
+- **aiken-lang**: fix type-checker not raising error when comparing non-serialisable types. See #940. @KtorZ
+- **aiken-project**: show a warning when ignoring modules in lib/validator because they have an invalid name. See #916. @KtorZ
+
+### Changed
+
+> [!WARNING]
+>
+> **BREAKING-CHANGE**
+>
+> 2-tuples `(a, b)` are now treated the same as 3+ tuples -- which directly impacts the way that Aiken now deserialise those, especially when nested inside a `List`.
+>
+> To deserialize into a list of 2-tuple (`List<(a, b)>`), one is now expected to provide a CBOR array of arrays (of 2 elements). Previously, this would require to provide a CBOR map! The downside of the latter is that CBOR serialization libraries do not necessarily preserve the order of keys in a map which could cause issues down the line, in particular with Aiken's dictionnaries.
+>
+> To recover the old behavior when desired, Aiken introduces a new type `Pair<a, b>` to the language. So any existing program can be migrated by switching any occurences of `(a, b)` to `Pair<a, b>`.
+>
+> However, it is often preferable to use 2-tuples where possible. The main place you will see usage of `Pair` is in the script context because its form is imposed by the ledger.
+
+- **aiken-lang**: altered internal representation of 2-tuples to distinguish them from pairs. @KtorZ @Microproofs
+- **aiken-lang**: some more code gen cleanup. @Microproofs
+- **aiken-lang**: new optimization for wrapped builtins found in the stdlib. @Microproofs
+- **aiken-project**: slightly restyle warnings to be less noisy. @KtorZ
 
 ## v1.0.26-alpha - 2024-03-25
 

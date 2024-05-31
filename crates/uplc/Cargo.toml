@@ -1,9 +1,9 @@
 [package]
 name = "uplc"
 description = "Utilities for working with Untyped Plutus Core"
-version = "1.0.26-alpha"
+version = "1.0.28-alpha"
 edition = "2021"
-repository = "https://github.com/aiken-lang/aiken/crates/uplc"
+repository = "https://github.com/aiken-lang/aiken"
 homepage = "https://github.com/aiken-lang/aiken"
 license = "Apache-2.0"
 authors = ["Lucas Rosa <x@rvcas.dev>", "Kasey White <kwhitemsg@gmail.com>"]
@@ -19,8 +19,11 @@ miette = "5.5.0"
 num-bigint = "0.4.3"
 num-integer = "0.1.45"
 num-traits = "0.2.15"
-pallas.workspace = true
+pallas-crypto = "0.22.0"
+pallas-primitives = "0.22.0"
+pallas-addresses = "0.22.0"
 pallas-codec = { version = "0.22.0", features = ["num-bigint"] }
+pallas-traverse = "0.22.0"
 peg = "0.8.1"
 pretty = "0.11.3"
 serde = { version = "1.0.152", features = ["derive"] }

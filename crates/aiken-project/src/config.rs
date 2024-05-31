@@ -1,19 +1,54 @@
+use std::{fmt::Display, fs, io, path::Path};
+
 use crate::{github::repo::LatestRelease, package_name::PackageName, paths, Error};
 use aiken_lang::ast::Span;
+use semver::Version;
+
 use miette::NamedSource;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Display, fs, io, path::Path};
+
+pub use aiken_lang::plutus_version::PlutusVersion;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
     pub name: PackageName,
     pub version: String,
+    #[serde(
+        deserialize_with = "deserialize_version",
+        serialize_with = "serialize_version",
+        default = "default_version"
+    )]
+    pub compiler: Version,
+    #[serde(default)]
+    pub plutus: PlutusVersion,
     pub license: Option<String>,
     #[serde(default)]
     pub description: String,
     pub repository: Option<Repository>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
+}
+
+fn deserialize_version<'de, D>(deserializer: D) -> Result<Version, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let buf = String::deserialize(deserializer)?.replace('v', "");
+
+    Version::parse(&buf).map_err(serde::de::Error::custom)
+}
+
+fn serialize_version<S>(version: &Version, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let version = format!("v{}", version);
+
+    serializer.serialize_str(&version)
+}
+
+fn default_version() -> Version {
+    Version::parse(built_info::PKG_VERSION).unwrap()
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -53,6 +88,8 @@ impl Config {
         Config {
             name: name.clone(),
             version: "0.0.0".to_string(),
+            compiler: default_version(),
+            plutus: PlutusVersion::default(),
             license: Some("Apache-2.0".to_string()),
             description: format!("Aiken contracts for project '{name}'"),
             repository: Some(Repository {
@@ -105,7 +142,7 @@ impl Config {
         for existing in self.dependencies.iter_mut() {
             if existing.name == dependency.name {
                 return if and_replace {
-                    existing.version = dependency.version.clone();
+                    existing.version.clone_from(&dependency.version);
                     Some(self)
                 } else {
                     None

@@ -1,5 +1,7 @@
 use super::{
-    environment::{assert_no_labeled_arguments, collapse_links, EntityKind, Environment},
+    environment::{
+        assert_no_labeled_arguments, collapse_links, generalise, EntityKind, Environment,
+    },
     error::{Error, Warning},
     hydrator::Hydrator,
     pattern::PatternTyper,
@@ -9,22 +11,179 @@ use super::{
 use crate::{
     ast::{
         self, Annotation, Arg, ArgName, AssignmentKind, AssignmentPattern, BinOp, Bls12_381Point,
-        ByteArrayFormatPreference, CallArg, ClauseGuard, Constant, Curve, IfBranch,
+        ByteArrayFormatPreference, CallArg, ClauseGuard, Constant, Curve, Function, IfBranch,
         LogicalOpChainKind, Pattern, RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing,
         TypedArg, TypedCallArg, TypedClause, TypedClauseGuard, TypedIfBranch, TypedPattern,
         TypedRecordUpdateArg, UnOp, UntypedArg, UntypedAssignmentKind, UntypedClause,
-        UntypedClauseGuard, UntypedIfBranch, UntypedPattern, UntypedRecordUpdateArg,
+        UntypedClauseGuard, UntypedFunction, UntypedIfBranch, UntypedPattern,
+        UntypedRecordUpdateArg,
     },
     builtins::{
-        bool, byte_array, function, g1_element, g2_element, int, list, string, tuple, void,
+        bool, byte_array, function, g1_element, g2_element, int, list, pair, string, tuple, void,
     },
     expr::{FnStyle, TypedExpr, UntypedExpr},
     format,
     line_numbers::LineNumbers,
     tipo::{fields::FieldMap, PatternConstructor, TypeVar},
 };
-use std::{cmp::Ordering, collections::HashMap, ops::Deref, rc::Rc};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap},
+    ops::Deref,
+    rc::Rc,
+};
 use vec1::Vec1;
+
+pub(crate) fn infer_function(
+    fun: &UntypedFunction,
+    module_name: &str,
+    hydrators: &mut HashMap<String, Hydrator>,
+    environment: &mut Environment<'_>,
+    lines: &LineNumbers,
+    tracing: Tracing,
+) -> Result<Function<Rc<Type>, TypedExpr, TypedArg>, Error> {
+    if let Some(typed_fun) = environment.inferred_functions.get(&fun.name) {
+        return Ok(typed_fun.clone());
+    };
+
+    let Function {
+        doc,
+        location,
+        name,
+        public,
+        arguments,
+        body,
+        return_annotation,
+        end_position,
+        on_test_failure,
+        return_type: _,
+    } = fun;
+
+    let preregistered_fn = environment
+        .get_variable(name)
+        .expect("Could not find preregistered type for function");
+
+    let field_map = preregistered_fn.field_map().cloned();
+
+    let preregistered_type = preregistered_fn.tipo.clone();
+
+    let (args_types, return_type) = preregistered_type
+        .function_types()
+        .unwrap_or_else(|| panic!("Preregistered type for fn {name} was not a fn"));
+
+    let warnings = environment.warnings.clone();
+
+    // ━━━ open new scope ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    let initial_scope = environment.open_new_scope();
+
+    let arguments = arguments
+        .iter()
+        .zip(&args_types)
+        .map(|(arg_name, tipo)| arg_name.to_owned().set_type(tipo.clone()))
+        .collect();
+
+    let hydrator = hydrators
+        .remove(name)
+        .unwrap_or_else(|| panic!("Could not find hydrator for fn {name}"));
+
+    let mut expr_typer = ExprTyper::new(environment, lines, tracing);
+    expr_typer.hydrator = hydrator;
+    expr_typer.not_yet_inferred = BTreeSet::from_iter(hydrators.keys().cloned());
+
+    // Infer the type using the preregistered args + return types as a starting point
+    let inferred =
+        expr_typer.infer_fn_with_known_types(arguments, body.to_owned(), Some(return_type));
+
+    // We try to always perform a deep-first inferrence. So callee are inferred before callers,
+    // since this provides better -- and necessary -- information in particular with regards to
+    // generics.
+    //
+    // In principle, the compiler requires function definitions to be processed *in order*. So if
+    // A calls B, we must have inferred B before A. This is detected during inferrence, and we
+    // raise an error about it. Here however, we backtrack from that error and infer the caller
+    // first. Then, re-attempt to infer the current function. It may takes multiple attempts, but
+    // should eventually succeed.
+    //
+    // Note that we need to close the scope before backtracking to not mess with the scope of the
+    // callee. Otherwise, identifiers present in the caller's scope may become available to the
+    // callee.
+    if let Err(Error::MustInferFirst { function, .. }) = inferred {
+        // Reset the environment & scope.
+        hydrators.insert(name.to_string(), expr_typer.hydrator);
+        environment.close_scope(initial_scope);
+        *environment.warnings = warnings;
+
+        // Backtrack and infer callee first.
+        infer_function(
+            &function,
+            environment.current_module,
+            hydrators,
+            environment,
+            lines,
+            tracing,
+        )?;
+
+        // Then, try again the entire function definition.
+        return infer_function(fun, module_name, hydrators, environment, lines, tracing);
+    }
+
+    let (arguments, body, return_type) = inferred?;
+
+    let args_types = arguments.iter().map(|a| a.tipo.clone()).collect();
+
+    let tipo = function(args_types, return_type);
+
+    let safe_to_generalise = !expr_typer.ungeneralised_function_used;
+
+    environment.close_scope(initial_scope);
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+    // Assert that the inferred type matches the type of any recursive call
+    environment.unify(preregistered_type, tipo.clone(), *location, false)?;
+
+    // Generalise the function if safe to do so
+    let tipo = if safe_to_generalise {
+        environment.ungeneralised_functions.remove(name);
+
+        let tipo = generalise(tipo, 0);
+
+        let module_fn = ValueConstructorVariant::ModuleFn {
+            name: name.clone(),
+            field_map,
+            module: module_name.to_owned(),
+            arity: arguments.len(),
+            location: *location,
+            builtin: None,
+        };
+
+        environment.insert_variable(name.clone(), module_fn, tipo.clone());
+
+        tipo
+    } else {
+        tipo
+    };
+
+    let inferred_fn = Function {
+        doc: doc.clone(),
+        location: *location,
+        name: name.clone(),
+        public: *public,
+        arguments,
+        return_annotation: return_annotation.clone(),
+        return_type: tipo
+            .return_type()
+            .expect("Could not find return type for fn"),
+        body,
+        on_test_failure: on_test_failure.clone(),
+        end_position: *end_position,
+    };
+
+    environment
+        .inferred_functions
+        .insert(name.to_string(), inferred_fn.clone());
+
+    Ok(inferred_fn)
+}
 
 #[derive(Debug)]
 pub(crate) struct ExprTyper<'a, 'b> {
@@ -39,6 +198,9 @@ pub(crate) struct ExprTyper<'a, 'b> {
     // Type hydrator for creating types from annotations
     pub(crate) hydrator: Hydrator,
 
+    // A static set of remaining function names that are known but not yet inferred
+    pub(crate) not_yet_inferred: BTreeSet<String>,
+
     // We keep track of whether any ungeneralised functions have been used
     // to determine whether it is safe to generalise this expression after
     // it has been inferred.
@@ -46,6 +208,21 @@ pub(crate) struct ExprTyper<'a, 'b> {
 }
 
 impl<'a, 'b> ExprTyper<'a, 'b> {
+    pub fn new(
+        environment: &'a mut Environment<'b>,
+        lines: &'a LineNumbers,
+        tracing: Tracing,
+    ) -> Self {
+        Self {
+            hydrator: Hydrator::new(),
+            not_yet_inferred: BTreeSet::new(),
+            environment,
+            tracing,
+            ungeneralised_function_used: false,
+            lines,
+        }
+    }
+
     fn check_when_exhaustiveness(
         &mut self,
         typed_clauses: &[TypedClause],
@@ -225,6 +402,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             } => self.infer_seq(location, expressions),
 
             UntypedExpr::Tuple { location, elems } => self.infer_tuple(elems, location),
+
+            UntypedExpr::Pair { location, fst, snd } => self.infer_pair(*fst, *snd, location),
 
             UntypedExpr::String { location, value } => Ok(self.infer_string(value, location)),
 
@@ -489,6 +668,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
                 self.unify(left.tipo(), right.tipo(), right.location(), false)?;
 
+                for tipo in &[left.tipo(), right.tipo()] {
+                    ensure_serialisable(false, tipo.clone(), location)
+                        .map_err(|_| Error::IllegalComparison { location })?;
+                }
+
                 return Ok(TypedExpr::BinOp {
                     location,
                     name,
@@ -604,7 +788,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         };
 
         let spread = self.infer(*spread.base)?;
-        let return_type = self.instantiate(ret.clone(), &mut HashMap::new());
+        let return_type = self.instantiate(ret.clone(), &mut HashMap::new(), location)?;
 
         // Check that the spread variable unifies with the return type of the constructor
         self.unify(return_type, spread.tipo(), spread.location(), false)?;
@@ -763,7 +947,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             (module.name.clone(), constructor.clone())
         };
 
-        let tipo = self.instantiate(constructor.tipo, &mut HashMap::new());
+        let tipo = self.instantiate(constructor.tipo, &mut HashMap::new(), select_location)?;
 
         let constructor = match &constructor.variant {
             variant @ ValueConstructorVariant::ModuleFn { name, module, .. } => {
@@ -837,7 +1021,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 .get(module)
                 .and_then(|module| module.accessors.get(name)),
 
-            _something_without_fields => return Err(unknown_field(vec![])),
+            Type::Pair { .. } => self.environment.accessors.get("Pair"),
+
+            _something_without_fields => {
+                return Err(unknown_field(vec![]));
+            }
         }
         .ok_or_else(|| unknown_field(vec![]))?;
 
@@ -857,9 +1045,10 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
         let mut type_vars = HashMap::new();
 
-        let accessor_record_type = self.instantiate(accessor_record_type, &mut type_vars);
+        let accessor_record_type =
+            self.instantiate(accessor_record_type, &mut type_vars, record.location())?;
 
-        let tipo = self.instantiate(tipo, &mut type_vars);
+        let tipo = self.instantiate(tipo, &mut type_vars, record.location())?;
 
         self.unify(
             accessor_record_type,
@@ -934,7 +1123,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let ann_typ = if let Some(ann) = annotation {
             let ann_typ = self
                 .type_from_annotation(ann)
-                .map(|t| self.instantiate(t, &mut HashMap::new()))?;
+                .map(|t| self.instantiate(t, &mut HashMap::new(), location))??;
 
             self.unify(
                 ann_typ.clone(),
@@ -1803,6 +1992,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         is_validator_param: false,
                     };
 
+                    let pattern_is_var = pattern.is_var();
+
                     continuation.insert(
                         0,
                         UntypedExpr::Assignment {
@@ -1821,6 +2012,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                             // erase backpassing while preserving assignment kind.
                             kind: match kind {
                                 AssignmentKind::Let { .. } => AssignmentKind::let_(),
+                                AssignmentKind::Expect { .. }
+                                    if pattern_is_var && annotation.is_none() =>
+                                {
+                                    AssignmentKind::let_()
+                                }
                                 AssignmentKind::Expect { .. } => AssignmentKind::expect(),
                             },
                         },
@@ -2016,6 +2212,26 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    fn infer_pair(
+        &mut self,
+        fst: UntypedExpr,
+        snd: UntypedExpr,
+        location: Span,
+    ) -> Result<TypedExpr, Error> {
+        let typed_fst = self.infer(fst)?;
+        ensure_serialisable(false, typed_fst.tipo(), location)?;
+
+        let typed_snd = self.infer(snd)?;
+        ensure_serialisable(false, typed_snd.tipo(), location)?;
+
+        Ok(TypedExpr::Pair {
+            location,
+            tipo: pair(typed_fst.tipo(), typed_snd.tipo()),
+            fst: typed_fst.into(),
+            snd: typed_snd.into(),
+        })
+    }
+
     fn infer_tuple(&mut self, elems: Vec<UntypedExpr>, location: Span) -> Result<TypedExpr, Error> {
         let mut typed_elems = vec![];
 
@@ -2039,13 +2255,13 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
     fn infer_tuple_index(
         &mut self,
-        tuple: UntypedExpr,
+        tuple_or_pair: UntypedExpr,
         index: usize,
         location: Span,
     ) -> Result<TypedExpr, Error> {
-        let tuple = self.infer(tuple)?;
+        let tuple_or_pair = self.infer(tuple_or_pair)?;
 
-        let tipo = match *collapse_links(tuple.tipo()) {
+        let tipo = match *collapse_links(tuple_or_pair.tipo()) {
             Type::Tuple {
                 ref elems,
                 alias: _,
@@ -2061,9 +2277,22 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     Ok(elems[index].clone())
                 }
             }
-            _ => Err(Error::NotATuple {
+            Type::Pair {
+                ref fst,
+                ref snd,
+                alias: _,
+            } => {
+                if index == 0 {
+                    Ok(fst.clone())
+                } else if index == 1 {
+                    Ok(snd.clone())
+                } else {
+                    Err(Error::PairIndexOutOfBound { location, index })
+                }
+            }
+            _ => Err(Error::NotIndexable {
                 location,
-                tipo: tuple.tipo(),
+                tipo: tuple_or_pair.tipo(),
             }),
         }?;
 
@@ -2071,7 +2300,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             location,
             tipo,
             index,
-            tuple: Box::new(tuple),
+            tuple: Box::new(tuple_or_pair),
         })
     }
 
@@ -2145,17 +2374,36 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                             variables: self.environment.local_value_names(),
                         })?;
 
-                // Note whether we are using an ungeneralised function so that we can
-                // tell if it is safe to generalise this function after inference has
-                // completed.
-                if matches!(
-                    &constructor.variant,
-                    ValueConstructorVariant::ModuleFn { .. }
-                ) {
+                if let ValueConstructorVariant::ModuleFn { name: fn_name, .. } =
+                    &constructor.variant
+                {
+                    // Note whether we are using an ungeneralised function so that we can
+                    // tell if it is safe to generalise this function after inference has
+                    // completed.
                     let is_ungeneralised = self.environment.ungeneralised_functions.contains(name);
 
                     self.ungeneralised_function_used =
                         self.ungeneralised_function_used || is_ungeneralised;
+
+                    // In case we use another function, infer it first before going further.
+                    // This ensures we have as much information possible about the function
+                    // when we start inferring expressions using it (i.e. calls).
+                    //
+                    // In a way, this achieves a cheap topological processing of definitions
+                    // where we infer used definitions first. And as a consequence, it solves
+                    // issues where expressions would be wrongly assigned generic variables
+                    // from other definitions.
+                    if let Some(fun) = self.environment.module_functions.remove(fn_name) {
+                        // NOTE: Recursive functions should not run into this multiple time.
+                        // If we have no hydrator for this function, it means that we have already
+                        // encountered it.
+                        if self.not_yet_inferred.contains(&fun.name) {
+                            return Err(Error::MustInferFirst {
+                                function: fun.clone(),
+                                location: *location,
+                            });
+                        }
+                    }
                 }
 
                 // Register the value as seen for detection of unused values
@@ -2201,7 +2449,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         } = constructor;
 
         // Instantiate generic variables into unbound variables for this usage
-        let tipo = self.instantiate(tipo, &mut HashMap::new());
+        let tipo = self.instantiate(tipo, &mut HashMap::new(), *location)?;
 
         Ok(ValueConstructor {
             public,
@@ -2280,22 +2528,15 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
-    fn instantiate(&mut self, t: Rc<Type>, ids: &mut HashMap<u64, Rc<Type>>) -> Rc<Type> {
-        self.environment.instantiate(t, ids, &self.hydrator)
-    }
-
-    pub fn new(
-        environment: &'a mut Environment<'b>,
-        lines: &'a LineNumbers,
-        tracing: Tracing,
-    ) -> Self {
-        Self {
-            hydrator: Hydrator::new(),
-            environment,
-            tracing,
-            ungeneralised_function_used: false,
-            lines,
-        }
+    fn instantiate(
+        &mut self,
+        t: Rc<Type>,
+        ids: &mut HashMap<u64, Rc<Type>>,
+        location: Span,
+    ) -> Result<Rc<Type>, Error> {
+        let result = self.environment.instantiate(t, ids, &self.hydrator);
+        ensure_serialisable(true, result.clone(), location)?;
+        Ok(result)
     }
 
     pub fn new_unbound_var(&mut self) -> Rc<Type> {
@@ -2339,6 +2580,7 @@ fn assert_no_assignment(expr: &UntypedExpr) -> Result<(), Error> {
         | UntypedExpr::Sequence { .. }
         | UntypedExpr::String { .. }
         | UntypedExpr::Tuple { .. }
+        | UntypedExpr::Pair { .. }
         | UntypedExpr::TupleIndex { .. }
         | UntypedExpr::UnOp { .. }
         | UntypedExpr::Var { .. }
@@ -2366,7 +2608,7 @@ fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
                     },
                     arguments: vec![],
                     module: None,
-                    with_spread: false,
+                    spread_location: None,
                     tipo: void(),
                 },
                 kind: AssignmentKind::let_(),
@@ -2381,7 +2623,7 @@ fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
     Ok(expr)
 }
 
-pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Result<(), Error> {
+pub fn ensure_serialisable(is_top_level: bool, t: Rc<Type>, location: Span) -> Result<(), Error> {
     match t.deref() {
         Type::App {
             args,
@@ -2391,7 +2633,7 @@ pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Resul
             contains_opaque: _,
             alias: _,
         } => {
-            if t.is_ml_result() {
+            if !is_top_level && t.is_ml_result() {
                 return Err(Error::IllegalTypeInData {
                     tipo: t.clone(),
                     location,
@@ -2419,7 +2661,7 @@ pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Resul
             ret,
             alias: _,
         } => {
-            if !allow_fn {
+            if !is_top_level {
                 return Err(Error::IllegalTypeInData {
                     tipo: t.clone(),
                     location,
@@ -2427,20 +2669,25 @@ pub fn ensure_serialisable(allow_fn: bool, t: Rc<Type>, location: Span) -> Resul
             }
 
             args.iter()
-                .map(|e| ensure_serialisable(allow_fn, e.clone(), location))
+                .map(|e| ensure_serialisable(true, e.clone(), location))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            ensure_serialisable(allow_fn, ret.clone(), location)
+            ensure_serialisable(true, ret.clone(), location)
         }
 
         Type::Var { tipo, alias } => match tipo.borrow().deref() {
             TypeVar::Unbound { .. } => Ok(()),
             TypeVar::Generic { .. } => Ok(()),
             TypeVar::Link { tipo } => ensure_serialisable(
-                allow_fn,
+                is_top_level,
                 Type::with_alias(tipo.clone(), alias.clone()),
                 location,
             ),
         },
+
+        Type::Pair { fst, snd, .. } => {
+            ensure_serialisable(false, fst.clone(), location)?;
+            ensure_serialisable(false, snd.clone(), location)
+        }
     }
 }
